@@ -29,13 +29,13 @@
 
 ## 收录的实验
 
-三组均为按配方分组的 8/1/1 划分，100,000 步、V100、每 5,000 步保存普通与 EMA checkpoint。最佳 checkpoint 由完整验证集的结构级 macro-F1 选择。
+三组均为按配方分组的 8/1/1 划分，100,000 步、V100、每 5,000 步保存。最佳 checkpoint 由完整验证集的结构级 macro-F1 选择。
 
 | 实验目录 | 任务 | 抽样 | 已选模型 | 原 Bohrium 训练任务 |
 |---|---|---|---|---|
-| `experiments/binary_natural` | 二分类 CE | 自然 | 95,000 步 EMA | 23560328 |
-| `experiments/binary_balanced` | 二分类 CE | 类别均衡 | 50,000 步 EMA | 23560329 |
-| `experiments/three_natural` | 三分类 CE | 自然 | 95,000 步 EMA | 23562056 |
+| `experiments/binary_natural` | 二分类 CE | 自然 | 95,000 步  | 23560328 |
+| `experiments/binary_balanced` | 二分类 CE | 类别均衡 | 50,000 步  | 23560329 |
+| `experiments/three_natural` | 三分类 CE | 自然 | 95,000 步  | 23562056 |
 
 | 测试集，结构级 | 原任务准确率 | 原任务 macro-F1 | 合并后二分类准确率 | 不纯相误判率 |
 |---|---:|---:|---:|---:|
@@ -185,15 +185,5 @@ python scripts/reproduce.py prepare \
 
 历史结构数据的保存帧存在几何收敛审计问题，详见 [数据质量边界](docs/DATA.md#几何质量边界)。这里保留历史数据身份与结果，不将它们描述为全部严格收敛。
 
-## 上传 GitHub
-
-仓库已配置 `.gitignore` 和 GitHub Actions。训练数组、背景数据、运行目录和 `machine*.json` 不纳入版本管理。三个最佳模型每个约 2 MB，可以直接用 Git 保存。
-
-在 GitHub 创建空仓库后，在当前仓库根目录执行：
-
-```bash
-git remote add origin https://github.com/YOUR_ACCOUNT/YOUR_REPOSITORY.git
-git push -u origin main
-```
 
 许可和上游归属见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 [LICENSE](LICENSE)。
