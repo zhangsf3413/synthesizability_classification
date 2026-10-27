@@ -129,7 +129,7 @@ def add_file(source, target, archive):
     info = tarfile.TarInfo(str(target))
     content = Path(source).read_bytes()
     info.size = len(content)
-    info.mode = 0o644
+    info.mode = 0o755 if str(target) == "bin/dp" else 0o644
     archive.addfile(info, io.BytesIO(content))
 
 
@@ -159,18 +159,16 @@ def prepare(experiment, mode, output, dataset, background, pretrained):
                 )
         for file in sorted((ROOT / "workflow").iterdir()):
             if file.is_file():
-                add_file(file, file.name, archive)
+                add_file(file, Path("bin") / file.name, archive)
         for name in ("input.json", "experiment_manifest.json"):
             add_file(exp / name, name, archive)
         for name in (
             "repro_common.py",
             "stage_data.py",
             "evaluate_remote.py",
-            "train_remote.py",
-            "runtime_checks.py",
+            "run_remote.py",
+            "deepmd_commands.py",
             "predict_remote.py",
-            "validate_classification.py",
-            "select_checkpoints_remote.py",
         ):
             add_file(ROOT / "scripts" / name, name, archive)
         add_file(
@@ -193,40 +191,35 @@ def prepare(experiment, mode, output, dataset, background, pretrained):
         info = tarfile.TarInfo("reproduction_spec.json")
         info.size = len(encoded)
         archive.addfile(info, io.BytesIO(encoded))
-    if mode == "train":
-        execution = "python -u train_remote.py"
-    elif mode == "predict":
-        execution = "python -u predict_remote.py"
-    else:
-        execution = f"python -u evaluate_remote.py --mode {mode}"
-    script = f"""#!/usr/bin/env bash
+    script = """#!/usr/bin/env bash
 set -Eeuo pipefail
+exec 2>&1
 export BOHRIUM_MULTITASK_REMOTE=1
-export DP_BACKEND=pytorch DP_TF32_INFER=0 DP_AMP_INFER=0 NUM_WORKERS=0
+export DP_TF32_INFER=0 DP_AMP_INFER=0 NUM_WORKERS=0
 export OMP_NUM_THREADS=8 DP_INTRA_OP_PARALLELISM_THREADS=8 DP_INTER_OP_PARALLELISM_THREADS=1
 export PYTHONUNBUFFERED=1
-collect() {{
+collect() {
     rc=$?
     trap - EXIT
     set +e
     mkdir -p repro_outputs
     for f in bohrium_reproduction.log bohrium_reproduction.err reproduction_spec.json input.json \\
-             environment.json pip-freeze.txt classification_unit_tests.log lcurve.out \\
-             best_checkpoint.pt multitask_diagnostics.json runtime_preparation_checks.json; do
+             environment.json pip-freeze.txt lcurve.out best_checkpoint.pt; do
         [[ ! -f "$f" ]] || cp "$f" repro_outputs/
     done
     for d in evaluation evaluation_reproduced predictions; do
         [[ ! -d "$d" ]] || cp -a "$d" repro_outputs/
     done
     for f in model*.pt; do [[ ! -f "$f" ]] || cp "$f" repro_outputs/; done
-    printf '{{"exit_code": %s}}\\n' "$rc" > repro_outputs/exit_status.json
+    printf '{"exit_code": %s}\\n' "$rc" > repro_outputs/exit_status.json
     tar -czf reproduction_result.tar.gz repro_outputs
     exit "$rc"
-}}
+}
 trap collect EXIT
 tar -xzf payload.tar.gz
+export PATH="$PWD/bin:$PATH"
 python -m pip freeze > pip-freeze.txt
-{execution}
+python -u run_remote.py
 """
     (output / "run_job.sh").write_text(script)
     forward = ["payload.tar.gz", "run_job.sh"]

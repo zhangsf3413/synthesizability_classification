@@ -25,7 +25,7 @@
 
 交叉熵直接接收原始 logits，在内部进行 log-softmax；**损失前不再额外加 softmax**。输出概率时再用 softmax，分类结果取 argmax。
 
-详见 [实现审查](docs/IMPLEMENTATION.md)。
+分类原理见 [实现说明](docs/IMPLEMENTATION.md)；与上游的命令差异和代码精简见 [DeepMD 对照审查](docs/DEEPMD_AUDIT.md)。
 
 ## 收录的实验
 
@@ -55,7 +55,7 @@ vendor/            实际历史训练的 869 个运行源码文件，不含编�
 upstream/          上游 commit 锁定、完整补丁、15 个改动文件及源码校验值
 metadata/          固定划分清单、索引、标签映射、模型与环境来源
 scripts/           数据校验、Bohrium 任务准备/提交、训练、评估、预测入口
-workflow/          统一的 classification 训练诊断与源码激活流程
+workflow/          标准 dp 命令的源码启动器与镜像编译库适配
 tests/             不执行模型的科学结果与打包检查
 docs/              实现、数据、运行方法和实验结果说明
 .github/workflows/ GitHub Actions 自动复核已有结果，不训练模型
@@ -104,7 +104,7 @@ python scripts/bohrium.py submit runs/three_smoke \
   --machine /private/path/machine.json --batch runs/batch_smoke
 ```
 
-smoke 使用仓库中的固定最佳模型，先执行 GPU 分类测试，再评估完整 valid，并比较历史逐结构 logits 与类别。它不训练，也不读取 test。
+smoke 使用仓库中的固定最佳模型，在 GPU 上执行一次完整 valid 的标准 `dp --pt test`，并比较历史逐结构 logits 与类别。它不训练，也不读取 test。
 
 查看、下载同一批次：
 
@@ -134,6 +134,15 @@ python scripts/bohrium.py submit runs/three_train \
 改为 `binary_natural` 或 `binary_balanced` 即可复现相应实验。多任务一起提交时，将目录一起传给 `submit`，使用同一个 `--batch`；驱动启用 `grouped=True` 并复用组 ID。
 
 正式训练从原 DPA4 权重开始；上传内容不含已经训练好的分类模型。训练完对每个普通和 EMA checkpoint 做完整验证集评估，选定后才建立 test 标签目录并评估 test。历史测试结果只作为参照，不用于新一轮 checkpoint 选择。
+
+作业内实际调用的是标准 DeepMD 命令：
+
+```bash
+dp --pt train input.json --finetune pretrained/model.ckpt-200000.pt --skip-neighbor-stat
+dp --pt test -m best_checkpoint.pt -s data/phase/valid -n 0 --head synthesizability -d evaluation/valid/dptest
+```
+
+第二条以三分类 valid 为例；二分类使用 `data/binary/valid`。训练、损失、优化器和抽样均由 DeepMD 执行，复现脚本只准备标签、组织命令、选模和汇总结果。
 
 ## 5. 只重测已有模型
 

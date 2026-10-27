@@ -74,7 +74,7 @@ def stage(splits=("train", "valid")):
             if int(row[label_key]) != int(labels[i]):
                 raise ValueError("Experimental class label mismatch")
         (target / "set.000").mkdir(parents=True)
-        for key in arrays:
+        for key in ("coord", "box", "real_atom_types"):
             shutil.copyfile(src / "set.000" / f"{key}.npy", target / "set.000" / f"{key}.npy")
         for name in ("type.raw", "type_map.raw"):
             shutil.copyfile(src / name, target / name)

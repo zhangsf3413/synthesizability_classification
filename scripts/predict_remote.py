@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import os
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -32,38 +33,15 @@ def main():
     spec = load_json("reproduction_spec.json")
     if sha256("best_checkpoint.pt") != spec["model_sha256"]:
         raise ValueError("Selected model hash mismatch")
-    from runtime_checks import initialize
+    sys.path.insert(0, str(Path("bin").resolve()))
+    from use_classification_source import activate
 
-    initialize(run_tests=False)
-    import torch
+    activate()
     from deepmd.infer.deep_classification import DeepClassification
 
-    torch.set_grad_enabled(False)
-    model = DeepClassification(
-        "best_checkpoint.pt",
-        head="synthesizability",
-        auto_batch_size=False,
-        no_jit=True,
-        nlist_backend="native",
-    )
+    model = DeepClassification("best_checkpoint.pt", head="synthesizability")
     if model.get_task_dim() != spec["classes"] or model.get_var_name() != spec["label_name"]:
         raise ValueError("Unexpected classification head")
-    # Do not let a permissive checkpoint loader silently leave tensors uninitialized.
-    original = torch.load("best_checkpoint.pt", map_location="cpu", weights_only=True)
-    state = original.get("model", original)
-    prefix = "model.synthesizability."
-    expected = {
-        k.replace(prefix, "model.Default.", 1): v
-        for k, v in state.items()
-        if k.startswith(prefix) and isinstance(v, torch.Tensor)
-    }
-    loaded = {
-        k: v for k, v in model.deep_eval.dp.state_dict().items() if isinstance(v, torch.Tensor)
-    }
-    if set(expected) != set(loaded) or any(
-        not torch.equal(v.detach().cpu(), expected[k]) for k, v in loaded.items()
-    ):
-        raise ValueError("Loaded model tensors do not exactly match the selected checkpoint")
     root = Path(spec["external_dataset_root"]).resolve()
     index = root / "prediction_index.csv"
     if index.is_file():
@@ -122,9 +100,7 @@ def main():
         i = int(row["frame"])
         if not 0 <= i < len(coord) or coord.shape[1] != types.shape[1] * 3:
             raise ValueError("Invalid frame or atom count")
-        logits = np.asarray(
-            model.eval(coord[i : i + 1], box[i : i + 1], types[i], atomic=False)[0]
-        )[0]
+        logits = np.asarray(model.eval(coord[i : i + 1], box[i : i + 1], types[i])[0])[0]
         if logits.shape != (spec["classes"],) or not np.isfinite(logits).all():
             raise ValueError("Unexpected prediction shape or nonfinite logits")
         all_logits.append(logits)

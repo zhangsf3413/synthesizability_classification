@@ -1,20 +1,31 @@
 {
-  "checked_at_utc": "2026-10-27T14:41:31.780506+00:00",
+  "checked_at_utc": "2026-10-27T15:14:03.072425+00:00",
   "status": "passed",
   "checks": {
     "source_files_sha256": 869,
     "patched_upstream_reconstruction": true,
     "historical_dp_test_outputs_recomputed": 9,
     "external_structures_verified_read_only": 1845,
-    "unit_tests_passed": 9,
+    "unit_tests_passed": 12,
     "ruff_check": "passed",
     "ruff_format": "passed",
     "training_data_packaged": false,
     "new_gpu_smoke_submitted": false,
     "new_training_executed": false,
     "local_model_execution": false,
-    "public_entrypoint_shell_syntax": "passed"
+    "public_entrypoint_shell_syntax": "passed",
+    "native_cli_parser": "pinned upstream parser passed",
+    "native_test_adapter": "historical-output replay passed",
+    "external_resource_and_credential_handling": "mocked submission check passed"
   },
   "limits": "New portable GPU entrypoints have not been run in a new Bohrium job. Historical successful jobs and native outputs are retained; users should run smoke with their mounted dataset before training.",
-  "scope": "Later native classification + CE only; binary natural, binary balanced, three-class natural."
+  "scope": "Later native classification + CE only; binary natural, binary balanced, three-class natural.",
+  "simplification": {
+    "runtime_files_before": 15,
+    "runtime_files_after": 13,
+    "runtime_lines_before": 1766,
+    "runtime_lines_after": 1339,
+    "training_and_test_entrypoints": "native dp --pt train/test",
+    "training_hooks": false
+  }
 }

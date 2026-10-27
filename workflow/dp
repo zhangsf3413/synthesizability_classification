@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Use the unmodified DeepMD CLI with this job's archived classification sources."""
+
+import os
+import sys
+
+from use_classification_source import activate
+
+if os.environ.get("BOHRIUM_MULTITASK_REMOTE") != "1":
+    raise SystemExit("Run model commands inside the Bohrium job.")
+
+activate()
+from deepmd.main import main  # noqa: E402
+
+main(sys.argv[1:])

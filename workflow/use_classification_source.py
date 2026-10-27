@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 
-def activate(source: str | Path = "deepmd-kit-classification") -> dict:
+def activate(source: str | Path = "deepmd-kit-classification") -> None:
     source = Path(source).resolve()
     if not (source / "deepmd/pt/model/model/sezm_classification_model.py").is_file():
         raise RuntimeError(f"Patched classification source is missing: {source}")
@@ -48,9 +48,3 @@ def activate(source: str | Path = "deepmd-kit-classification") -> dict:
 
     if not Path(argcheck.__file__).resolve().is_relative_to(source):
         raise RuntimeError("Schema did not load from the patched repository")
-    return {
-        "source": str(source),
-        "compiled_resources": str(binary_root),
-        "schema_source": argcheck.__file__,
-        "editable_redirectors_disabled": len(redirects),
-    }

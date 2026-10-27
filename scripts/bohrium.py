@@ -25,27 +25,25 @@ def machine_for(machine_path, batch):
     settings = profile.setdefault("input_data", {})
     settings.update(
         machine_type=environment["gpu"],
-        scass_type=environment["gpu"],
         image_name=environment["image"],
         grouped=True,
         output_log=False,
         job_name="synth_classification_reproduction",
     )
     settings.pop("backward_files", None)
-    settings.pop("job_resources", None)
     os.environ.pop("LBG_CLI_DEBUG_PRINT", None)
     machine = Machine.load_from_dict(data)
     group = batch / "task_group.json"
     if group.exists():
         machine.group_id = int(load_json(group)["job_group_id"])
     original = machine.serialize
+    # Submission also serializes internally; never persist remote credentials.
     machine.serialize = lambda if_empty_remote_profile=False: original(if_empty_remote_profile=True)
     return machine
 
 
 def save(directory, submission):
     state = submission.serialize()
-    state["machine"]["remote_profile"] = {}
     write_json(directory / "submission_state.json", state)
     job = submission.belonging_jobs[0]
     raw = str(job.job_id)
@@ -85,7 +83,7 @@ def process(action, directory, machine_path, batch):
             }
         )
         task = Task(
-            command=f"bash run_job.sh > {LOG} 2>&1",
+            command="bash run_job.sh",
             task_work_path=".",
             forward_files=spec["forward_files"],
             backward_files=spec["backward_files"],
