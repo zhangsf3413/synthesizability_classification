@@ -1,0 +1,42 @@
+{
+  "status": "passed",
+  "gpu": "Tesla V100-SXM2-32GB",
+  "expected_total_steps": 100000,
+  "training_backward_counts": {
+    "synthesizability": 50054,
+    "opencsp": 49946
+  },
+  "descriptor_gradient_probes": {
+    "synthesizability": {
+      "parameter": "output_ffn.so3_linear_2.weight",
+      "gradient_l2_norm": 0.8146944046020508,
+      "finite": true
+    },
+    "opencsp": {
+      "parameter": "output_ffn.so3_linear_2.weight",
+      "gradient_l2_norm": 4.95966911315918,
+      "finite": true
+    }
+  },
+  "diagnostics_change_loss_or_sampling": false,
+  "binary_head": {
+    "model_class": "SeZMClassificationModel",
+    "num_classes": 2,
+    "fitting_type": "classification",
+    "label_name": "synthesizable",
+    "method": "ce",
+    "output_statistics_enabled": false
+  },
+  "descriptor_parameters_shared_by_identity": true,
+  "descriptor_all_parameters_trainable": true,
+  "descriptor_parameter_tensors": 85,
+  "descriptor_parameter_elements": 464332,
+  "branch_head_parameter_elements": {
+    "opencsp": 6432,
+    "synthesizability": 6402
+  },
+  "peak_cuda_allocated_bytes": 3383578112,
+  "peak_cuda_reserved_bytes": 9535750144,
+  "descriptor_probe_max_abs_change": 0.22190946340560913,
+  "descriptor_changed": true
+}

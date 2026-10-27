@@ -1,0 +1,69 @@
+{
+  "n": 20,
+  "num_classes": 3,
+  "ce": 11.143331264423647,
+  "accuracy": 0.75,
+  "macro_f1": 0.7001763668430335,
+  "balanced_accuracy": 0.6987179487179488,
+  "mae": 0.17530714902854866,
+  "mse": 0.1620681855984664,
+  "rmse": 0.4025769312795585,
+  "confusion_matrix": [
+    [
+      3,
+      0,
+      0
+    ],
+    [
+      0,
+      1,
+      3
+    ],
+    [
+      0,
+      2,
+      11
+    ]
+  ],
+  "precision_per_class": [
+    1.0,
+    0.3333333333333333,
+    0.7857142857142857
+  ],
+  "recall_per_class": [
+    1.0,
+    0.25,
+    0.8461538461538461
+  ],
+  "f1_per_class": [
+    1.0,
+    0.2857142857142857,
+    0.8148148148148148
+  ],
+  "support_per_class": [
+    3,
+    4,
+    13
+  ],
+  "binary_accuracy": 1.0,
+  "binary_macro_f1": 1.0,
+  "binary_confusion_matrix": [
+    [
+      3,
+      0
+    ],
+    [
+      0,
+      17
+    ]
+  ],
+  "tn": 3,
+  "fp": 0,
+  "fn": 0,
+  "tp": 17,
+  "false_positive_rate": 0.0,
+  "error_units": "probability",
+  "binary_rule": "argmax among three logits, then merge Nearly Pure and Pure",
+  "evaluation_unit": "recipe",
+  "aggregation": "mean raw logits, then three-class argmax"
+}

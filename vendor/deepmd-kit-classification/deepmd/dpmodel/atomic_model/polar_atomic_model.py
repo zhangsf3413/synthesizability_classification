@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+from typing import (
+    Any,
+)
+
+import array_api_compat
+
+from deepmd.dpmodel.array_api import (
+    Array,
+)
+from deepmd.dpmodel.fitting.polarizability_fitting import (
+    PolarFitting,
+)
+
+from .dp_atomic_model import (
+    DPAtomicModel,
+)
+
+
+class DPPolarAtomicModel(DPAtomicModel):
+    r"""Atomic polarizability model reconstructed in the laboratory frame.
+
+    Let :math:`\mathbf R_i\in\mathbb R^{m_1\times3}` be the descriptor
+    rotation matrix.  In diagonal fitting mode the network predicts
+    :math:`\mathbf p_i=F_\theta(\mathcal D_i)` and reconstructs
+
+    .. math::
+
+       \boldsymbol\alpha_i=\mathbf R_i^T
+       \operatorname{diag}(\mathbf p_i)\mathbf R_i.
+
+    In full-matrix mode it predicts :math:`\widehat{\mathbf P}_i`, symmetrizes
+    :math:`\mathbf P_i=(\widehat{\mathbf P}_i+
+    \widehat{\mathbf P}_i^T)/2`, and reconstructs
+
+    .. math::
+
+       \boldsymbol\alpha_i=\mathbf R_i^T\mathbf P_i\mathbf R_i.
+
+    Type-dependent scaling is applied to the predicted local coefficients, and
+    an optional isotropic shift :math:`c_{t_i}\mathbf I` is added after the
+    reconstruction.  The frame tensor is additive:
+    :math:`\boldsymbol\alpha=\sum_i\boldsymbol\alpha_i`.
+    """
+
+    def __init__(
+        self, descriptor: Any, fitting: Any, type_map: list[str], **kwargs: Any
+    ) -> None:
+        if not isinstance(fitting, PolarFitting):
+            raise TypeError(
+                "fitting must be an instance of PolarFitting for DPPolarAtomicModel"
+            )
+        super().__init__(descriptor, fitting, type_map, **kwargs)
+
+    def apply_out_stat(
+        self,
+        ret: dict[str, Array],
+        atype: Array,
+    ) -> dict[str, Array]:
+        """Apply the stat to each atomic output.
+
+        Parameters
+        ----------
+        ret
+            The returned dict by the forward_atomic method
+        atype
+            The atom types. nf x nloc
+
+        """
+        xp = array_api_compat.array_namespace(atype)
+        out_bias, out_std = self._fetch_out_stat(self.bias_keys)
+
+        if self.fitting_net.shift_diag:
+            dtype = out_bias[self.bias_keys[0]].dtype
+            device = array_api_compat.device(out_bias[self.bias_keys[0]])
+            for kk in self.bias_keys:
+                ntypes = out_bias[kk].shape[0]
+                temp = xp.mean(
+                    xp.linalg.diagonal(
+                        out_bias[kk].reshape(ntypes, 3, 3),
+                        offset=0,
+                    ),
+                    axis=1,
+                )
+                modified_bias = temp[atype]
+
+                # (..., 1)  -- (nframes, nloc, 1) or (N, 1)
+                modified_bias = (
+                    modified_bias[..., xp.newaxis] * (self.fitting_net.scale[atype])
+                )
+
+                eye = xp.eye(3, dtype=dtype, device=device)
+                # leading-dim-agnostic: (nf, nloc) dense or (N,) flat graph path
+                eye = xp.tile(eye, (*atype.shape, 1, 1))
+                # (..., 3, 3)
+                modified_bias = modified_bias[..., xp.newaxis] * eye
+
+                # nf x nloc x odims (rect) or N x odims (flat), out_bias: ntypes x odims
+                ret[kk] = ret[kk] + modified_bias
+        return ret

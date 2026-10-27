@@ -1,0 +1,57 @@
+{
+  "selection_complete": true,
+  "selection_split": "valid",
+  "evaluation_unit": "structure",
+  "primary_metric": "macro_f1",
+  "tie_breakers": [
+    "balanced_accuracy",
+    "lower_mae",
+    "earlier_step"
+  ],
+  "class_order": [
+    "NonSynthesizable",
+    "Synthesizable"
+  ],
+  "prediction_rule": "argmax of two raw outputs; ties predict class 0",
+  "mae_units": "probability",
+  "test_used": false,
+  "best": {
+    "step": 50000,
+    "family": "ema",
+    "checkpoint": "model_binary_ema.ckpt-50000.pt",
+    "split": "valid",
+    "n": 192,
+    "ce": 0.05364795836842157,
+    "accuracy": 0.9947916666666666,
+    "macro_f1": 0.9899869621903521,
+    "balanced_accuracy": 0.9833333333333334,
+    "mae": 0.020159710288199382,
+    "mse": 0.00841077786404628,
+    "rmse": 0.09171029311940007,
+    "tn": 29,
+    "fp": 1,
+    "fn": 0,
+    "tp": 162,
+    "false_positive_rate": 0.03333333333333333
+  },
+  "selected_checkpoint_train_metrics": {
+    "step": 50000,
+    "family": "ema",
+    "checkpoint": "model_binary_ema.ckpt-50000.pt",
+    "split": "train",
+    "n": 1476,
+    "ce": 0.516683045054426,
+    "accuracy": 0.9356368563685636,
+    "macro_f1": 0.8843343201733582,
+    "balanced_accuracy": 0.960666144200627,
+    "mae": 0.06430136315701696,
+    "mse": 0.05789143372626508,
+    "rmse": 0.2406063875425278,
+    "tn": 199,
+    "fp": 1,
+    "fn": 94,
+    "tp": 1182,
+    "false_positive_rate": 0.005
+  },
+  "selected_model_file": "best_checkpoint.pt"
+}

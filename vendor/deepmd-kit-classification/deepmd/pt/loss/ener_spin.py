@@ -1,0 +1,622 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+from typing import (
+    Any,
+)
+
+import torch
+import torch.nn.functional as F
+
+from deepmd.dpmodel.loss.reduction import (
+    masked_atom_mean,
+    per_frame_component_mean,
+)
+from deepmd.pt.loss.loss import (
+    TaskLoss,
+)
+from deepmd.pt.utils import (
+    env,
+)
+from deepmd.pt.utils.env import (
+    GLOBAL_PT_FLOAT_PRECISION,
+)
+from deepmd.utils.data import (
+    DataRequirementItem,
+)
+from deepmd.utils.version import (
+    check_version_compatibility,
+)
+
+
+def _masked_force_mag_tensors(
+    label: dict[str, torch.Tensor],
+    model_pred: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Collect magnetic-force labels and predictions on spin-active atoms.
+
+    Parameters
+    ----------
+    label : dict[str, torch.Tensor]
+        Batch labels containing ``force_mag``.
+    model_pred : dict[str, torch.Tensor]
+        Model outputs containing ``force_mag`` and ``mask_mag``.
+
+    Returns
+    -------
+    label_fm : torch.Tensor
+        Reference magnetic forces with shape ``(n_mag, 3)``.
+    pred_fm : torch.Tensor
+        Predicted magnetic forces with shape ``(n_mag, 3)``.
+    """
+    atomic_mask = model_pred["mask_mag"].expand(-1, -1, 3)
+    label_fm = label["force_mag"][atomic_mask].reshape(-1, 3)
+    pred_fm = model_pred["force_mag"][atomic_mask].reshape(-1, 3)
+    return label_fm, pred_fm
+
+
+class EnergySpinLoss(TaskLoss):
+    def __init__(
+        self,
+        starter_learning_rate: float = 1.0,
+        start_pref_e: float = 0.0,
+        limit_pref_e: float = 0.0,
+        start_pref_fr: float = 0.0,
+        limit_pref_fr: float = 0.0,
+        start_pref_fm: float = 0.0,
+        limit_pref_fm: float = 0.0,
+        start_pref_v: float = 0.0,
+        limit_pref_v: float = 0.0,
+        start_pref_ae: float = 0.0,
+        limit_pref_ae: float = 0.0,
+        enable_atom_ener_coeff: bool = False,
+        loss_func: str = "mse",
+        inference: bool = False,
+        intensive_ener_virial: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        r"""Construct a layer to compute loss on energy, real force, magnetic force and virial.
+
+        Parameters
+        ----------
+        starter_learning_rate : float
+            The learning rate at the start of the training.
+        start_pref_e : float
+            The prefactor of energy loss at the start of the training.
+        limit_pref_e : float
+            The prefactor of energy loss at the end of the training.
+        start_pref_fr : float
+            The prefactor of real force loss at the start of the training.
+        limit_pref_fr : float
+            The prefactor of real force loss at the end of the training.
+        start_pref_fm : float
+            The prefactor of magnetic force loss at the start of the training.
+        limit_pref_fm : float
+            The prefactor of magnetic force loss at the end of the training.
+        start_pref_v : float
+            The prefactor of virial loss at the start of the training.
+        limit_pref_v : float
+            The prefactor of virial loss at the end of the training.
+        start_pref_ae : float
+            The prefactor of atomic energy loss at the start of the training.
+        limit_pref_ae : float
+            The prefactor of atomic energy loss at the end of the training.
+        enable_atom_ener_coeff : bool
+            if true, the energy will be computed as \sum_i c_i E_i
+        loss_func : str
+            Loss function type for energy, force, and virial terms.
+            Options: 'mse' (Mean Squared Error, L2 loss, default) or 'mae' (Mean Absolute Error, L1 loss).
+            MAE loss is less sensitive to outliers compared to MSE loss.
+        inference : bool
+            If true, it will output all losses found in output, ignoring the pre-factors.
+        intensive_ener_virial : bool
+            Controls the normalization exponent used for the MSE energy and virial loss terms.
+            If true, those MSE terms use intensive normalization by the square of the number of
+            atoms (1/N^2), which is consistent with per-atom RMSE reporting. If false (default),
+            the legacy normalization (1/N) is used for those MSE terms. Note that this 1/N^2
+            behavior does not apply to the MAE code paths: MAE energy/virial losses do not use
+            the `intensive_ener_virial` exponent in the same way. The default is false for backward
+            compatibility with models trained using deepmd-kit <= 3.1.3.
+        **kwargs
+            Other keyword arguments.
+        """
+        super().__init__()
+
+        self.loss_func = loss_func
+        self.starter_learning_rate = starter_learning_rate
+        self.has_e = (start_pref_e != 0.0 and limit_pref_e != 0.0) or inference
+        self.has_fr = (start_pref_fr != 0.0 and limit_pref_fr != 0.0) or inference
+        self.has_fm = (start_pref_fm != 0.0 and limit_pref_fm != 0.0) or inference
+        self.has_v = (start_pref_v != 0.0 and limit_pref_v != 0.0) or inference
+        self.has_ae = (start_pref_ae != 0.0 and limit_pref_ae != 0.0) or inference
+
+        self.start_pref_e = start_pref_e
+        self.limit_pref_e = limit_pref_e
+        self.start_pref_fr = start_pref_fr
+        self.limit_pref_fr = limit_pref_fr
+        self.start_pref_fm = start_pref_fm
+        self.limit_pref_fm = limit_pref_fm
+        self.start_pref_v = start_pref_v
+        self.limit_pref_v = limit_pref_v
+        self.start_pref_ae = start_pref_ae
+        self.limit_pref_ae = limit_pref_ae
+        self.enable_atom_ener_coeff = enable_atom_ener_coeff
+        self.inference = inference
+        self.intensive_ener_virial = intensive_ener_virial
+
+    def forward(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        model: torch.nn.Module,
+        label: dict[str, torch.Tensor],
+        natoms: int,
+        learning_rate: float,
+        mae: bool = False,
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, dict[str, torch.Tensor]]:
+        """Return energy loss with magnetic labels.
+
+        Parameters
+        ----------
+        input_dict : dict[str, torch.Tensor]
+            Model inputs.
+        model : torch.nn.Module
+            Model to be used to output the predictions.
+        label : dict[str, torch.Tensor]
+            Labels.
+        natoms : int
+            The local atom number.
+
+        Returns
+        -------
+        model_pred: dict[str, torch.Tensor]
+            Model predictions.
+        loss: torch.Tensor
+            Loss for model to minimize.
+        more_loss: dict[str, torch.Tensor]
+            Other losses for display.
+        """
+        model_pred = self._inject_atom_mask(model(**input_dict), input_dict)
+        coef = learning_rate / self.starter_learning_rate
+        pref_e = self.limit_pref_e + (self.start_pref_e - self.limit_pref_e) * coef
+        pref_fr = self.limit_pref_fr + (self.start_pref_fr - self.limit_pref_fr) * coef
+        pref_fm = self.limit_pref_fm + (self.start_pref_fm - self.limit_pref_fm) * coef
+        pref_v = self.limit_pref_v + (self.start_pref_v - self.limit_pref_v) * coef
+        pref_ae = self.limit_pref_ae + (self.start_pref_ae - self.limit_pref_ae) * coef
+        loss = torch.tensor(0.0, dtype=env.GLOBAL_PT_FLOAT_PRECISION, device=env.DEVICE)
+        more_loss = {}
+        # more_loss['log_keys'] = []  # showed when validation on the fly
+        # more_loss['test_keys'] = []  # showed when doing dp test
+        atom_norm = 1.0 / natoms
+        # Normalization exponent controls loss scaling with system size:
+        # - norm_exp=2 (intensive_ener_virial=True): loss uses 1/N² scaling, making it independent of system size
+        # - norm_exp=1 (intensive_ener_virial=False, legacy): loss uses 1/N scaling, which varies with system size
+        norm_exp = 2 if self.intensive_ener_virial else 1
+
+        # Per-frame mask: recover real-atom count per frame when mask is provided.
+        # maskf[nf, nloc] = 1.0 for real atoms, 0.0 for ghost padding atoms.
+        if "mask" in model_pred:
+            maskf = model_pred["mask"]  # [nf, nloc], float
+            real_natoms_f = torch.sum(maskf, dim=-1)  # [nf]
+            inv = (1.0 / real_natoms_f).reshape(-1)  # [nf]
+            _nf = maskf.shape[0]
+            _nloc = maskf.shape[1]
+        else:
+            # inv, _nf, _nloc are only read inside ``if maskf is not None`` guards,
+            # so leaving them unset here is safe (and avoids dead-store warnings).
+            maskf = None
+
+        if self.has_e and "energy" in model_pred and "energy" in label:
+            energy_pred = model_pred["energy"]
+            energy_label = label["energy"]
+            if self.enable_atom_ener_coeff and "atom_energy" in model_pred:
+                atom_ener_pred = model_pred["atom_energy"]
+                # when ener_coeff (\nu) is defined, the energy is defined as
+                # E = \sum_i \nu_i E_i
+                # instead of the sum of atomic energies.
+                #
+                # A case is that we want to train reaction energy
+                # A + B -> C + D
+                # E = - E(A) - E(B) + E(C) + E(D)
+                # A, B, C, D could be put far away from each other
+                atom_ener_coeff = label["atom_ener_coeff"]
+                atom_ener_coeff = atom_ener_coeff.reshape(atom_ener_pred.shape)
+                energy_pred = torch.sum(atom_ener_coeff * atom_ener_pred, dim=1)
+            find_energy = label.get("find_energy", 0.0)
+            pref_e = pref_e * find_energy
+            if self.loss_func == "mse":
+                se_e = torch.square(energy_pred - energy_label)  # [nf, k]
+                if maskf is not None:
+                    # Idiom 2 (extensive): per-frame normalization by real-atom count.
+                    per_frame_e = per_frame_component_mean(se_e)  # [nf]
+                    if not self.inference:
+                        more_loss["l2_ener_loss"] = self.display_if_exist(
+                            torch.mean(per_frame_e).detach(), find_energy
+                        )
+                    loss += pref_e * torch.mean(per_frame_e * inv**norm_exp)
+                    rmse_e = torch.sqrt(torch.mean(per_frame_e * inv**2))
+                    more_loss["rmse_e"] = self.display_if_exist(
+                        rmse_e.detach(), find_energy
+                    )
+                else:
+                    l2_ener_loss = torch.mean(se_e)
+                    if not self.inference:
+                        more_loss["l2_ener_loss"] = self.display_if_exist(
+                            l2_ener_loss.detach(), find_energy
+                        )
+                    loss += atom_norm**norm_exp * (pref_e * l2_ener_loss)
+                    rmse_e = l2_ener_loss.sqrt() * atom_norm
+                    more_loss["rmse_e"] = self.display_if_exist(
+                        rmse_e.detach(), find_energy
+                    )
+                # more_loss['log_keys'].append('rmse_e')
+            elif self.loss_func == "mae":
+                l1_ener_loss = F.l1_loss(
+                    energy_pred.reshape(-1),
+                    energy_label.reshape(-1),
+                    reduction="mean",
+                )
+                if maskf is not None:
+                    # Idiom 2 (extensive) with abs: per-frame normalization by real-atom count.
+                    per_frame_ae = per_frame_component_mean(
+                        torch.abs(energy_pred - energy_label)
+                    )  # [nf]
+                    l1_ener_masked = torch.mean(per_frame_ae * inv)
+                    loss += pref_e * l1_ener_masked
+                    more_loss["mae_e"] = self.display_if_exist(
+                        l1_ener_masked.detach(), find_energy
+                    )
+                else:
+                    loss += atom_norm * (pref_e * l1_ener_loss)
+                    more_loss["mae_e"] = self.display_if_exist(
+                        l1_ener_loss.detach() * atom_norm, find_energy
+                    )
+                # more_loss['log_keys'].append('rmse_e')
+            else:
+                raise NotImplementedError(
+                    f"Loss type {self.loss_func} is not implemented for energy loss."
+                )
+            if mae:
+                if maskf is not None:
+                    per_frame_ae = per_frame_component_mean(
+                        torch.abs(energy_pred - energy_label)
+                    )
+                    mae_e = torch.mean(per_frame_ae * inv)
+                else:
+                    mae_e = (
+                        torch.mean(torch.abs(energy_pred - energy_label)) * atom_norm
+                    )
+                more_loss["mae_e"] = self.display_if_exist(mae_e.detach(), find_energy)
+                mae_e_all = torch.mean(torch.abs(energy_pred - energy_label))
+                more_loss["mae_e_all"] = self.display_if_exist(
+                    mae_e_all.detach(), find_energy
+                )
+
+        if self.has_fr and "force" in model_pred and "force" in label:
+            find_force_r = label.get("find_force", 0.0)
+            pref_fr = pref_fr * find_force_r
+            if self.loss_func == "mse":
+                diff_fr = label["force"] - model_pred["force"]  # [nf, nloc, 3]
+                if maskf is not None:
+                    # Idiom 1 (per-atom masked mean, ncomp=3).
+                    l2_force_real_loss = masked_atom_mean(
+                        torch.square(diff_fr), maskf, 3
+                    )
+                    if not self.inference:
+                        more_loss["l2_force_r_loss"] = self.display_if_exist(
+                            l2_force_real_loss.detach(), find_force_r
+                        )
+                    loss += (pref_fr * l2_force_real_loss).to(GLOBAL_PT_FLOAT_PRECISION)
+                    rmse_fr = l2_force_real_loss.sqrt()
+                    more_loss["rmse_fr"] = self.display_if_exist(
+                        rmse_fr.detach(), find_force_r
+                    )
+                    if mae:
+                        mae_fr = masked_atom_mean(torch.abs(diff_fr), maskf, 3)
+                        more_loss["mae_fr"] = self.display_if_exist(
+                            mae_fr.detach(), find_force_r
+                        )
+                else:
+                    l2_force_real_loss = torch.mean(torch.square(diff_fr))
+                    if not self.inference:
+                        more_loss["l2_force_r_loss"] = self.display_if_exist(
+                            l2_force_real_loss.detach(), find_force_r
+                        )
+                    loss += (pref_fr * l2_force_real_loss).to(GLOBAL_PT_FLOAT_PRECISION)
+                    rmse_fr = l2_force_real_loss.sqrt()
+                    more_loss["rmse_fr"] = self.display_if_exist(
+                        rmse_fr.detach(), find_force_r
+                    )
+                    if mae:
+                        mae_fr = torch.mean(torch.abs(diff_fr))
+                        more_loss["mae_fr"] = self.display_if_exist(
+                            mae_fr.detach(), find_force_r
+                        )
+            elif self.loss_func == "mae":
+                abs_diff_fr = torch.abs(
+                    label["force"] - model_pred["force"]
+                )  # [nf, nloc, 3]
+                if maskf is not None:
+                    # Idiom 1 (per-atom masked mean, ncomp=3) with abs.
+                    l1_force_real_masked = masked_atom_mean(abs_diff_fr, maskf, 3)
+                    more_loss["mae_fr"] = self.display_if_exist(
+                        l1_force_real_masked.detach(), find_force_r
+                    )
+                    loss += (pref_fr * l1_force_real_masked).to(
+                        GLOBAL_PT_FLOAT_PRECISION
+                    )
+                else:
+                    l1_force_real_loss = torch.mean(abs_diff_fr)
+                    more_loss["mae_fr"] = self.display_if_exist(
+                        l1_force_real_loss.detach(), find_force_r
+                    )
+                    loss += (pref_fr * l1_force_real_loss).to(GLOBAL_PT_FLOAT_PRECISION)
+            else:
+                raise NotImplementedError(
+                    f"Loss type {self.loss_func} is not implemented for real force loss."
+                )
+
+        if self.has_fm and "force_mag" in model_pred and "force_mag" in label:
+            find_force_m = label.get("find_force_mag", 0.0)
+            pref_fm = pref_fm * find_force_m
+            label_fm, pred_fm = _masked_force_mag_tensors(label, model_pred)
+            if self.loss_func == "mse":
+                diff_fm = label_fm - pred_fm
+                l2_force_mag_loss = torch.mean(torch.square(diff_fm))
+                if not self.inference:
+                    more_loss["l2_force_m_loss"] = self.display_if_exist(
+                        l2_force_mag_loss.detach(), find_force_m
+                    )
+                # A batch with no magnetic atoms makes ``torch.mean`` reduce
+                # over an empty tensor (NaN), and ``0 * NaN`` is still NaN, so
+                # ``nan_to_num`` keeps such a batch's force_mag term at zero
+                # loss and zero gradient instead of poisoning the whole step.
+                safe_l2_force_mag_loss = torch.nan_to_num(l2_force_mag_loss)
+                loss += (pref_fm * safe_l2_force_mag_loss).to(GLOBAL_PT_FLOAT_PRECISION)
+                rmse_fm = safe_l2_force_mag_loss.sqrt()
+                more_loss["rmse_fm"] = self.display_if_exist(
+                    rmse_fm.detach(), find_force_m
+                )
+                if mae:
+                    mae_fm = torch.nan_to_num(torch.mean(torch.abs(diff_fm)))
+                    more_loss["mae_fm"] = self.display_if_exist(
+                        mae_fm.detach(), find_force_m
+                    )
+            elif self.loss_func == "mae":
+                # Mean over frames, magnetic atoms and xyz (same reduction as
+                # force_mag MSE, force_real MAE and the displayed mae_fm) so the
+                # loss is batch-size independent: a 2-frame batch equals the mean
+                # of the two single-frame losses.
+                l1_force_mag_loss = torch.nan_to_num(
+                    torch.mean(torch.abs(label_fm - pred_fm))
+                )
+                more_loss["mae_fm"] = self.display_if_exist(
+                    l1_force_mag_loss.detach(), find_force_m
+                )
+                loss += (pref_fm * l1_force_mag_loss).to(GLOBAL_PT_FLOAT_PRECISION)
+            else:
+                raise NotImplementedError(
+                    f"Loss type {self.loss_func} is not implemented for magnetic force loss."
+                )
+
+        if self.has_ae and "atom_energy" in model_pred and "atom_ener" in label:
+            atom_ener = model_pred["atom_energy"]
+            atom_ener_label = label["atom_ener"]
+            find_atom_ener = label.get("find_atom_ener", 0.0)
+            pref_ae = pref_ae * find_atom_ener
+
+            if maskf is not None:
+                # Idiom 1 (per-atom masked mean, ncomp=1).
+                ae = atom_ener.reshape(_nf, _nloc, 1)
+                ae_label = atom_ener_label.reshape(_nf, _nloc, 1)
+                if self.loss_func == "mse":
+                    l2_atom_ener_loss = masked_atom_mean(
+                        torch.square(ae_label - ae), maskf, 1
+                    )
+                    if not self.inference:
+                        more_loss["l2_atom_ener_loss"] = self.display_if_exist(
+                            l2_atom_ener_loss.detach(), find_atom_ener
+                        )
+                    loss += (pref_ae * l2_atom_ener_loss).to(GLOBAL_PT_FLOAT_PRECISION)
+                    rmse_ae = l2_atom_ener_loss.sqrt()
+                    more_loss["rmse_ae"] = self.display_if_exist(
+                        rmse_ae.detach(), find_atom_ener
+                    )
+                elif self.loss_func == "mae":
+                    l1_atom_ener_loss = masked_atom_mean(
+                        torch.abs(ae_label - ae), maskf, 1
+                    )
+                    loss += (pref_ae * l1_atom_ener_loss).to(GLOBAL_PT_FLOAT_PRECISION)
+                    more_loss["mae_ae"] = self.display_if_exist(
+                        l1_atom_ener_loss.detach(), find_atom_ener
+                    )
+                else:
+                    raise NotImplementedError(
+                        f"Loss type {self.loss_func} is not implemented for atomic energy loss."
+                    )
+            else:
+                atom_ener_reshape = atom_ener.reshape(-1)
+                atom_ener_label_reshape = atom_ener_label.reshape(-1)
+                if self.loss_func == "mse":
+                    l2_atom_ener_loss = torch.square(
+                        atom_ener_label_reshape - atom_ener_reshape
+                    ).mean()
+                    if not self.inference:
+                        more_loss["l2_atom_ener_loss"] = self.display_if_exist(
+                            l2_atom_ener_loss.detach(), find_atom_ener
+                        )
+                    loss += (pref_ae * l2_atom_ener_loss).to(GLOBAL_PT_FLOAT_PRECISION)
+                    rmse_ae = l2_atom_ener_loss.sqrt()
+                    more_loss["rmse_ae"] = self.display_if_exist(
+                        rmse_ae.detach(), find_atom_ener
+                    )
+                elif self.loss_func == "mae":
+                    l1_atom_ener_loss = F.l1_loss(
+                        atom_ener_reshape,
+                        atom_ener_label_reshape,
+                        reduction="mean",
+                    )
+                    loss += (pref_ae * l1_atom_ener_loss).to(GLOBAL_PT_FLOAT_PRECISION)
+                    more_loss["mae_ae"] = self.display_if_exist(
+                        l1_atom_ener_loss.detach(), find_atom_ener
+                    )
+                else:
+                    raise NotImplementedError(
+                        f"Loss type {self.loss_func} is not implemented for atomic energy loss."
+                    )
+
+        if self.has_v and "virial" in model_pred and "virial" in label:
+            find_virial = label.get("find_virial", 0.0)
+            pref_v = pref_v * find_virial
+            diff_v = label["virial"] - model_pred["virial"].reshape(-1, 9)  # [nf, 9]
+
+            if self.loss_func == "mse":
+                if maskf is not None:
+                    # Idiom 2 (extensive, k=9): per-frame normalization by real-atom count.
+                    per_frame_v = per_frame_component_mean(torch.square(diff_v))  # [nf]
+                    if not self.inference:
+                        more_loss["l2_virial_loss"] = self.display_if_exist(
+                            torch.mean(per_frame_v).detach(), find_virial
+                        )
+                    loss += pref_v * torch.mean(per_frame_v * inv**norm_exp)
+                    rmse_v = torch.sqrt(torch.mean(per_frame_v * inv**2))
+                    more_loss["rmse_v"] = self.display_if_exist(
+                        rmse_v.detach(), find_virial
+                    )
+                    if mae:
+                        per_frame_mae_v = per_frame_component_mean(
+                            torch.abs(diff_v)
+                        )  # [nf]
+                        mae_v = torch.mean(per_frame_mae_v * inv)
+                        more_loss["mae_v"] = self.display_if_exist(
+                            mae_v.detach(), find_virial
+                        )
+                else:
+                    l2_virial_loss = torch.mean(torch.square(diff_v))
+                    if not self.inference:
+                        more_loss["l2_virial_loss"] = self.display_if_exist(
+                            l2_virial_loss.detach(), find_virial
+                        )
+                    loss += atom_norm**norm_exp * (pref_v * l2_virial_loss)
+                    rmse_v = l2_virial_loss.sqrt() * atom_norm
+                    more_loss["rmse_v"] = self.display_if_exist(
+                        rmse_v.detach(), find_virial
+                    )
+                    if mae:
+                        mae_v = torch.mean(torch.abs(diff_v)) * atom_norm
+                        more_loss["mae_v"] = self.display_if_exist(
+                            mae_v.detach(), find_virial
+                        )
+            elif self.loss_func == "mae":
+                l1_virial_loss = F.l1_loss(
+                    label["virial"].reshape(-1),
+                    model_pred["virial"].reshape(-1),
+                    reduction="mean",
+                )
+                if maskf is not None:
+                    # Idiom 2 (extensive, k=9) with abs: per-frame normalization by real-atom count.
+                    per_frame_v = per_frame_component_mean(torch.abs(diff_v))  # [nf]
+                    l1_virial_masked = torch.mean(per_frame_v * inv)
+                    loss += pref_v * l1_virial_masked
+                    more_loss["mae_v"] = self.display_if_exist(
+                        l1_virial_masked.detach(), find_virial
+                    )
+                else:
+                    loss += atom_norm * (pref_v * l1_virial_loss)
+                    more_loss["mae_v"] = self.display_if_exist(
+                        l1_virial_loss.detach() * atom_norm, find_virial
+                    )
+            else:
+                raise NotImplementedError(
+                    f"Loss type {self.loss_func} is not implemented for virial loss."
+                )
+
+        if not self.inference:
+            more_loss["rmse"] = torch.sqrt(loss.detach())
+        return model_pred, loss, more_loss
+
+    @property
+    def label_requirement(self) -> list[DataRequirementItem]:
+        """Return data label requirements needed for this loss calculation."""
+        label_requirement = []
+        if self.has_e:
+            label_requirement.append(
+                DataRequirementItem(
+                    "energy",
+                    ndof=1,
+                    atomic=False,
+                    must=False,
+                    high_prec=True,
+                )
+            )
+        if self.has_fr:
+            label_requirement.append(
+                DataRequirementItem(
+                    "force",
+                    ndof=3,
+                    atomic=True,
+                    must=False,
+                    high_prec=False,
+                )
+            )
+        if self.has_fm:
+            label_requirement.append(
+                DataRequirementItem(
+                    "force_mag",
+                    ndof=3,
+                    atomic=True,
+                    must=False,
+                    high_prec=False,
+                )
+            )
+        if self.has_v:
+            label_requirement.append(
+                DataRequirementItem(
+                    "virial",
+                    ndof=9,
+                    atomic=False,
+                    must=False,
+                    high_prec=False,
+                )
+            )
+        if self.has_ae:
+            label_requirement.append(
+                DataRequirementItem(
+                    "atom_ener",
+                    ndof=1,
+                    atomic=True,
+                    must=False,
+                    high_prec=False,
+                )
+            )
+        return label_requirement
+
+    def serialize(self) -> dict:
+        """Serialize the loss module."""
+        return {
+            "@class": "EnergySpinLoss",
+            "@version": 2,
+            "starter_learning_rate": self.starter_learning_rate,
+            "start_pref_e": self.start_pref_e,
+            "limit_pref_e": self.limit_pref_e,
+            "start_pref_fr": self.start_pref_fr,
+            "limit_pref_fr": self.limit_pref_fr,
+            "start_pref_fm": self.start_pref_fm,
+            "limit_pref_fm": self.limit_pref_fm,
+            "start_pref_v": self.start_pref_v,
+            "limit_pref_v": self.limit_pref_v,
+            "start_pref_ae": self.start_pref_ae,
+            "limit_pref_ae": self.limit_pref_ae,
+            "enable_atom_ener_coeff": self.enable_atom_ener_coeff,
+            "loss_func": self.loss_func,
+            "intensive_ener_virial": self.intensive_ener_virial,
+        }
+
+    @classmethod
+    def deserialize(cls, data: dict) -> "EnergySpinLoss":
+        """Deserialize the loss module."""
+        data = data.copy()
+        version = data.pop("@version")
+        check_version_compatibility(version, 2, 1)
+        data.pop("@class")
+        # Handle backward compatibility for older versions without intensive_ener_virial
+        if version < 2:
+            data.setdefault("intensive_ener_virial", False)
+        return cls(**data)

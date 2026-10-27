@@ -1,0 +1,44 @@
+{
+  "status": "passed",
+  "scope": "schema and data only",
+  "dataset_counts": {
+    "train": {
+      "recipes": 157,
+      "structures": 1476,
+      "recipes_by_class": {
+        "0": 22,
+        "1": 36,
+        "2": 99
+      },
+      "structures_by_class": {
+        "0": 200,
+        "1": 347,
+        "2": 929
+      }
+    },
+    "valid": {
+      "recipes": 20,
+      "structures": 192,
+      "recipes_by_class": {
+        "0": 3,
+        "1": 4,
+        "2": 13
+      },
+      "structures_by_class": {
+        "0": 30,
+        "1": 37,
+        "2": 125
+      }
+    }
+  },
+  "class_sampling_mass": {
+    "0": 0.13550135501355012,
+    "1": 0.2350948509485095,
+    "2": 0.6294037940379403
+  },
+  "structure_fingerprints_verified": 1668,
+  "recipe_leakage": false,
+  "test_arrays_opened": false,
+  "local_training_executed": false,
+  "local_inference_executed": false
+}

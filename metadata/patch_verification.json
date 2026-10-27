@@ -1,0 +1,7 @@
+{
+  "status": "passed",
+  "upstream_commit": "9b779d9162c3dc5b1612df31a58f4a547f6fde9b",
+  "patch_applied_cleanly": true,
+  "historical_runtime_files_matched": 869,
+  "local_model_execution": false
+}

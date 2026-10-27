@@ -1,0 +1,12 @@
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+*.pt binary
+# Preserve exact historical bytes, including CSV BOM/line endings and source hashes.
+experiments/** -text
+metadata/** -text
+vendor/** -text
+workflow/** -text
+upstream/** -text
+results/** -text

@@ -1,0 +1,141 @@
+{
+  "status": "passed",
+  "checked_at_utc": "2026-10-27T06:19:39.546656+00:00",
+  "training_job_id": "23562056",
+  "checkpoint": "model_three_class_ema.ckpt-95000.pt",
+  "checkpoint_sha256": "89b4f0115e63bd29c13907713590c0bd8652b3a734ecd6795bfd568cf3a440d3",
+  "config_matches_remote_training_input": true,
+  "config_sha256": "9533b2704f5141503a23dcf2c6e382471b85e19e4c97622d804f62ebba5295c6",
+  "classification_head": {
+    "type": "classification",
+    "num_classes": 3,
+    "label_name": "phase_class",
+    "neuron": [
+      64,
+      64
+    ],
+    "activation_function": "silu",
+    "resnet_dt": false,
+    "precision": "float32",
+    "seed": 42
+  },
+  "effective_loss": "F.cross_entropy(logits, integer phase_class target)",
+  "experimental_workbook": "/root/.codex/attachments/3a8e754c-7c8c-461b-ba14-b92c767f738c/可合成性list261009.xlsx",
+  "experimental_labels_and_formulas_verified": 1845,
+  "source_dataset": "/root/perovskite/synthesizability_md/synthesizability_dpdata_811_20261016",
+  "training_dataset_local": "/root/perovskite/synthesizability_model_train/three_classification_natural_split811_v100_20261020/_development/data/phase/train",
+  "validation_dataset_local": "/root/perovskite/synthesizability_model_train/three_classification_natural_split811_v100_20261020/_development/data/phase/valid",
+  "test_dataset_local": "/root/perovskite/synthesizability_model_train/three_classification_natural_split811_v100_20261020/_heldout/heldout/phase/test",
+  "source_parent_dataset": "/root/perovskite/synthesizability_md/synthesizability_dpdata_test_split",
+  "split": "811",
+  "split_counts": {
+    "train": {
+      "recipes": 157,
+      "structures": 1476,
+      "recipes_by_class": {
+        "0": 22,
+        "1": 36,
+        "2": 99
+      },
+      "structures_by_class": {
+        "0": 200,
+        "1": 347,
+        "2": 929
+      }
+    },
+    "valid": {
+      "recipes": 20,
+      "structures": 192,
+      "recipes_by_class": {
+        "0": 3,
+        "1": 4,
+        "2": 13
+      },
+      "structures_by_class": {
+        "0": 30,
+        "1": 37,
+        "2": 125
+      }
+    },
+    "test": {
+      "recipes": 20,
+      "structures": 177,
+      "recipes_by_class": {
+        "0": 3,
+        "1": 4,
+        "2": 13
+      },
+      "structures_by_class": {
+        "0": 21,
+        "1": 38,
+        "2": 118
+      }
+    }
+  },
+  "class_mapping": {
+    "Impure": 0,
+    "Nearly Pure": 1,
+    "Pure": 2
+  },
+  "label_file": "phase_class.npy",
+  "label_dtype": "int32",
+  "label_shape": "(n_structures, 1)",
+  "label_values": [
+    0,
+    1,
+    2
+  ],
+  "onehot_conversion_verified": 1845,
+  "original_onehot_file_retained_but_not_used_as_CE_target": "synthesizability.npy",
+  "packed_development_files_identical_to_local": 1241,
+  "data_archive_sha256": "9f0d27e3c76ec0d7db7139f4e660e9e1f17c85897764d4d8fcd4ebebe87259e6",
+  "data_archive_contains_test": false,
+  "heldout_archive_sha256": "1ce697f7809b7f7a560946f66a1232d448a3e9964d8c6461145b2495a3d38a59",
+  "all_source_structure_arrays_preserved": true,
+  "unique_structure_fingerprints": 1845,
+  "no_recipe_or_exact_formula_leakage_between_splits": true,
+  "element_maps": [
+    "Ba",
+    "Ca",
+    "Co",
+    "Cu",
+    "Fe",
+    "K",
+    "La",
+    "Mg",
+    "Mn",
+    "Ni",
+    "O",
+    "Sm",
+    "Sr",
+    "Ti",
+    "Y"
+  ],
+  "model_type_map_length": 118,
+  "all_elements_supported_and_loader_remaps_by_symbol": true,
+  "structure_counts_by_natoms": {
+    "400": 1778,
+    "388": 2,
+    "384": 3,
+    "392": 24,
+    "404": 10,
+    "396": 28
+  },
+  "sampling": "natural prob_sys_size; no sys_probs",
+  "task_sampling": {
+    "opencsp": 0.5,
+    "synthesizability": 0.5
+  },
+  "actual_training_update_counts": {
+    "synthesizability": 50054,
+    "opencsp": 49946
+  },
+  "model_fixed_before_test": true,
+  "test_used_for_training_statistics_or_selection": false,
+  "new_prediction_structure_count": 523,
+  "new_prediction_structures_present_in_training_dataset": 0,
+  "geometry_quality_note": "optimized_POSCAR is copied from the last opt.traj frame, saved every 5 optimizer steps. An audit found 1451 of the 1847 outputs marked converged had stored-frame max force above 0.01 eV/A, even though opt_result.json recorded a converged final optimizer state. Use this as a provisional structure dataset; re-exporting/saving the exact final optimizer state is recommended before treating the structures as fully converged.",
+  "local_training_executed": false,
+  "local_model_inference_executed": false,
+  "audit_scope": "Data bytes, source experimental labels, archived remote configuration, runtime and selection records. No new model evaluation or hyperparameter changes."
+}

@@ -1,0 +1,51 @@
+{
+  "binary_natural": {
+    "kind": "binary",
+    "classes": 2,
+    "class_order": [
+      "NonSynthesizable",
+      "Synthesizable"
+    ],
+    "label_name": "synthesizable",
+    "data_name": "binary",
+    "selected_step": 95000,
+    "selected_family": "ema",
+    "model_sha256": "836aac37e24ee00f6a2c8d9a28856759a0e2b2d0d8eafcf364b9a25cda317282",
+    "input_sha256": "c6eec27cac799a64cbc56b82873ebcb63d1a44c18f68520f83e34c79572da5e0",
+    "bohrium_training_job_id": "23560328",
+    "sampling": "natural"
+  },
+  "binary_balanced": {
+    "kind": "binary",
+    "classes": 2,
+    "class_order": [
+      "NonSynthesizable",
+      "Synthesizable"
+    ],
+    "label_name": "synthesizable",
+    "data_name": "binary",
+    "selected_step": 50000,
+    "selected_family": "ema",
+    "model_sha256": "bf5d22316baffef029d4810065716320bf82328d98d284731a028807f4651cb7",
+    "input_sha256": "e85dbb516af9d5d27b8b95d9def96a42a0aaa7f2fc8787161c279919bf8212a6",
+    "bohrium_training_job_id": "23560329",
+    "sampling": "balanced"
+  },
+  "three_natural": {
+    "kind": "three",
+    "classes": 3,
+    "class_order": [
+      "Impure",
+      "Nearly Pure",
+      "Pure"
+    ],
+    "label_name": "phase_class",
+    "data_name": "phase",
+    "selected_step": 95000,
+    "selected_family": "ema",
+    "model_sha256": "89b4f0115e63bd29c13907713590c0bd8652b3a734ecd6795bfd568cf3a440d3",
+    "input_sha256": "9533b2704f5141503a23dcf2c6e382471b85e19e4c97622d804f62ebba5295c6",
+    "bohrium_training_job_id": "23562056",
+    "sampling": "natural"
+  }
+}

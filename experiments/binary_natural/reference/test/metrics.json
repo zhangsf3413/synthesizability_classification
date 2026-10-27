@@ -1,0 +1,43 @@
+{
+  "n": 177,
+  "num_classes": 2,
+  "ce": 0.0009257502586681023,
+  "accuracy": 1.0,
+  "macro_f1": 1.0,
+  "balanced_accuracy": 1.0,
+  "mae": 0.0008767702319498188,
+  "mse": 8.965994765805537e-05,
+  "rmse": 0.009468893687123928,
+  "confusion_matrix": [
+    [
+      21,
+      0
+    ],
+    [
+      0,
+      156
+    ]
+  ],
+  "precision_per_class": [
+    1.0,
+    1.0
+  ],
+  "recall_per_class": [
+    1.0,
+    1.0
+  ],
+  "f1_per_class": [
+    1.0,
+    1.0
+  ],
+  "support_per_class": [
+    21,
+    156
+  ],
+  "tn": 21,
+  "fp": 0,
+  "fn": 0,
+  "tp": 156,
+  "false_positive_rate": 0.0,
+  "error_units": "probability"
+}

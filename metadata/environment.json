@@ -1,0 +1,13 @@
+{
+  "image": "registry.dp.tech/dptech/dp/native/prod-435364/dpa4-rl-matdesign:0.0.7",
+  "gpu": "c12_m92_1 * NVIDIA V100",
+  "cpus": 12,
+  "gpus": 1,
+  "recorded_deepmd_version": "3.2.0",
+  "recorded_torch_version": "2.11.0+cu126",
+  "recorded_cuda_version": "12.6",
+  "python_major_minor": "3.13",
+  "historical_full_pip_freeze_available": false,
+  "compiled_library_source": "preinstalled in the pinned Bohrium image; unchanged by Python activation",
+  "pretrained_sha256": "316133698c00f3b74112616d8a6dee1e597b502746de68553b635b7861df5a74"
+}

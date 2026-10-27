@@ -1,0 +1,28 @@
+{
+  "repository": "https://github.com/Chengqian-Zhang/deepmd-kit.git",
+  "branch": "260720_classification",
+  "commit": "9b779d9162c3dc5b1612df31a58f4a547f6fde9b",
+  "upstream_branch_head_verified_on": "2026-10-27",
+  "patch": "patches/dpa4-classification.patch",
+  "patch_sha256": "856ec14680a57d298fa1c100e64d748b8d652db870364fabd9ac9ef6acfd1e93",
+  "changed_files": [
+    "deepmd/entrypoints/test.py",
+    "deepmd/infer/__init__.py",
+    "deepmd/infer/deep_classification.py",
+    "deepmd/pt/infer/deep_eval.py",
+    "deepmd/pt/loss/classification.py",
+    "deepmd/pt/model/atomic_model/sezm_atomic_model.py",
+    "deepmd/pt/model/model/__init__.py",
+    "deepmd/pt/model/model/classification_model.py",
+    "deepmd/pt/model/model/sezm_classification_model.py",
+    "deepmd/pt/model/task/classification.py",
+    "deepmd/utils/argcheck.py",
+    "deepmd/utils/classification.py",
+    "deepmd/utils/data_system.py",
+    "source/tests/pt/test_sezm_classification.py",
+    "source/tests/test_classification_metrics.py"
+  ],
+  "runtime_file_count": 869,
+  "runtime_sources_identical_in_all_three_experiments": true,
+  "runtime_sha256_index": "runtime_source_sha256.json"
+}

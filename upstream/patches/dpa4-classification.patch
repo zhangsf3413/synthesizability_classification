@@ -1,0 +1,1017 @@
+diff --git a/deepmd/entrypoints/test.py b/deepmd/entrypoints/test.py
+index 5057e04..f7f8d85 100644
+--- a/deepmd/entrypoints/test.py
++++ b/deepmd/entrypoints/test.py
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: LGPL-3.0-or-later
+ """Test trained DeePMD model."""
+ 
++import json
+ import logging
+ from pathlib import (
+     Path,
+@@ -24,6 +25,9 @@ from deepmd.dpmodel.utils.lmdb_data import (
+ from deepmd.infer.deep_dipole import (
+     DeepDipole,
+ )
++from deepmd.infer.deep_classification import (
++    DeepClassification,
++)
+ from deepmd.infer.deep_dos import (
+     DeepDOS,
+ )
+@@ -44,6 +48,12 @@ from deepmd.infer.deep_wfc import (
+     DeepWFC,
+ )
+ from deepmd.utils import random as dp_random
++from deepmd.utils.classification import (
++    classification_metrics,
++    classification_probabilities,
++    classification_statistics,
++    merge_classification_statistics,
++)
+ from deepmd.utils.compat import (
+     update_deepmd_input,
+ )
+@@ -79,6 +89,19 @@ __all__ = ["test"]
+ log = logging.getLogger(__name__)
+ 
+ 
++def _input_data_params(jdata: dict, key: str, head: str | None) -> dict:
++    """Resolve a single-task or explicitly selected multitask data branch."""
++    training = jdata.get("training", {})
++    if "data_dict" in training:
++        branches = training["data_dict"]
++        if head not in branches:
++            raise ValueError(
++                "Multitask input data requires --head with a valid task name"
++            )
++        return branches[head].get(key, {})
++    return training.get(key, {})
++
++
+ def test(
+     *,
+     model: str,
+@@ -134,7 +157,7 @@ def test(
+     if train_json is not None:
+         jdata = j_loader(train_json)
+         jdata = update_deepmd_input(jdata)
+-        data_params = jdata.get("training", {}).get("training_data", {})
++        data_params = _input_data_params(jdata, "training_data", head)
+         systems = data_params.get("systems")
+         if not systems:
+             raise RuntimeError("No training data found in input json")
+@@ -148,7 +171,7 @@ def test(
+     elif valid_json is not None:
+         jdata = j_loader(valid_json)
+         jdata = update_deepmd_input(jdata)
+-        data_params = jdata.get("training", {}).get("validation_data", {})
++        data_params = _input_data_params(jdata, "validation_data", head)
+         systems = data_params.get("systems")
+         if not systems:
+             raise RuntimeError("No validation data found in input json")
+@@ -240,6 +263,16 @@ def test(
+                     atomic,
+                     append_detail=(cc != 0),
+                 )
++            elif isinstance(dp, DeepClassification):
++                err = test_classification(
++                    dp,
++                    data,
++                    sys_label,
++                    numb_test,
++                    detail_file,
++                    atomic,
++                    append_detail=bool(err_coll),
++                )
+             elif isinstance(dp, DeepProperty):
+                 err = test_property(
+                     dp,
+@@ -266,6 +299,18 @@ def test(
+             log.info("# ----------------------------------------------- ")
+             err_coll.append(err)
+ 
++    if isinstance(dp, DeepClassification):
++        # F1 and balanced accuracy must be recomputed from the global counts.
++        # Averaging per-system F1 would weight recipes instead of structures.
++        metrics = classification_metrics(merge_classification_statistics(err_coll))
++        log.info("# -----classification over all tested structures-----")
++        log.info("# number of systems : %d", len(all_sys))
++        print_classification_sys_avg(metrics)
++        if detail_file is not None:
++            Path(detail_file).with_suffix(".classification.metrics.json").write_text(
++                json.dumps(metrics, indent=2) + "\n"
++            )
++        return
+     avg_err = weighted_average(err_coll)
+ 
+     # For mixed-nloc LMDB, err_coll may have more entries than all_sys
+@@ -1140,6 +1185,78 @@ def print_dos_sys_avg(avg: dict[str, float]) -> None:
+     log.info(f"DOS RMSE/Natoms    : {avg['rmse_dosa']:e} Occupation/eV")
+ 
+ 
++def test_classification(
++    dp: "DeepClassification",
++    data: DeepmdData,
++    system: str,
++    numb_test: int,
++    detail_file: str | None,
++    atomic: bool,
++    append_detail: bool = False,
++) -> dict[str, Any]:
++    """Read one integer label per structure and evaluate categorical logits."""
++    if atomic:
++        raise ValueError("Classification has structure labels; omit --atomic")
++    var_name = dp.get_var_name()
++    data.add(var_name, 1, atomic=False, must=True, high_prec=True)
++    if dp.get_dim_fparam() > 0:
++        data.add(
++            "fparam", dp.get_dim_fparam(), atomic=False, must=True, high_prec=False
++        )
++    if dp.get_dim_aparam() > 0:
++        data.add("aparam", dp.get_dim_aparam(), atomic=True, must=True, high_prec=False)
++    test_data = data.get_test()
++    n = min(len(test_data["coord"]), numb_test)
++    coord = test_data["coord"][:n].reshape(n, -1)
++    box = test_data["box"][:n] if data.pbc else None
++    atype = test_data["type"][:n] if data.mixed_type else test_data["type"][0]
++    logits = dp.eval(
++        coord,
++        box,
++        atype,
++        mixed_type=data.mixed_type,
++        fparam=test_data["fparam"][:n] if dp.get_dim_fparam() else None,
++        aparam=test_data["aparam"][:n] if dp.get_dim_aparam() else None,
++    )[0].reshape(n, dp.get_task_dim())
++    labels = test_data[var_name][:n]
++    statistics = classification_statistics(logits, labels)
++    print_classification_sys_avg(classification_metrics(statistics))
++    if detail_file is not None:
++        probabilities = classification_probabilities(logits)
++        columns = ["frame", "true_class", "predicted_class"]
++        columns += [f"logit_{i}" for i in range(dp.get_task_dim())]
++        columns += [f"prob_{i}" for i in range(dp.get_task_dim())]
++        save_txt_file(
++            Path(detail_file).with_suffix(".classification.out"),
++            np.column_stack(
++                (
++                    np.arange(n),
++                    labels.reshape(n),
++                    logits.argmax(axis=1),
++                    logits,
++                    probabilities,
++                )
++            ),
++            header=f"{system}: {' '.join(columns)}",
++            append=append_detail,
++        )
++    return statistics
++
++
++def print_classification_sys_avg(metrics: dict[str, Any]) -> None:
++    """Print classification metrics with unambiguous probability-error units."""
++    log.info("# number of structures : %d", metrics["n"])
++    for key in ("ce", "accuracy", "macro_f1", "balanced_accuracy", "mae", "rmse"):
++        log.info("CLASSIFICATION %s : %.8e", key, metrics[key])
++    log.info("# MAE/RMSE compare softmax probabilities with one-hot targets")
++    log.info(
++        "# confusion matrix (true rows, predicted columns): %s",
++        metrics["confusion_matrix"],
++    )
++    if "false_positive_rate" in metrics:
++        log.info("# class-0 false positive rate : %s", metrics["false_positive_rate"])
++
++
+ def test_property(
+     dp: "DeepProperty",
+     data: DeepmdData,
+diff --git a/deepmd/infer/__init__.py b/deepmd/infer/__init__.py
+index 77780d5..5d4bcaa 100644
+--- a/deepmd/infer/__init__.py
++++ b/deepmd/infer/__init__.py
+@@ -1,4 +1,7 @@
+ # SPDX-License-Identifier: LGPL-3.0-or-later
++from .deep_classification import (
++    DeepClassification,
++)
+ from .deep_eval import (
+     DeepEval,
+ )
+@@ -10,6 +13,7 @@ from .model_devi import (
+ )
+ 
+ __all__ = [
++    "DeepClassification",
+     "DeepEval",
+     "DeepPot",
+     "DeepPotential",
+diff --git a/deepmd/pt/infer/deep_eval.py b/deepmd/pt/infer/deep_eval.py
+index dffdbee..3b565ef 100644
+--- a/deepmd/pt/infer/deep_eval.py
++++ b/deepmd/pt/infer/deep_eval.py
+@@ -20,6 +20,9 @@ from deepmd.dpmodel.output_def import (
+     OutputVariableCategory,
+     OutputVariableDef,
+ )
++from deepmd.infer.deep_classification import (
++    DeepClassification,
++)
+ from deepmd.infer.deep_dipole import (
+     DeepDipole,
+ )
+@@ -418,6 +421,12 @@ class DeepEval(DeepEvalBackend):
+     @property
+     def model_type(self) -> type["DeepEvalWrapper"]:
+         """The the evaluator of the model type."""
++        model = self.dp.model["Default"]
++        if (
++            hasattr(model, "get_task_type")
++            and model.get_task_type() == "classification"
++        ):
++            return DeepClassification
+         model_output_type = self.dp.model["Default"].model_output_type()
+         if "energy" in model_output_type:
+             return DeepPot
+diff --git a/deepmd/pt/loss/classification.py b/deepmd/pt/loss/classification.py
+index ebbacbf..ddcbaef 100644
+--- a/deepmd/pt/loss/classification.py
++++ b/deepmd/pt/loss/classification.py
+@@ -20,10 +20,24 @@ from deepmd.utils.version import (
+ class ClassificationLoss(TaskLoss):
+     """Cross-entropy loss for system-level single-label classification."""
+ 
+-    def __init__(self, num_classes: int, var_name: str, **kwargs: Any) -> None:
++    def __init__(
++        self,
++        num_classes: int,
++        var_name: str,
++        metric: list[str] | None = None,
++        **kwargs: Any,
++    ) -> None:
+         super().__init__()
++        if num_classes < 2:
++            raise ValueError("num_classes must be at least 2")
+         self.num_classes = num_classes
+         self.var_name = var_name
++        self.metric = (
++            ["ce", "accuracy", "mae", "mse", "rmse"] if metric is None else metric
++        )
++        unknown = set(self.metric) - {"ce", "accuracy", "mae", "mse", "rmse"}
++        if unknown:
++            raise ValueError(f"Unknown classification metrics: {sorted(unknown)}")
+ 
+     def forward(
+         self,
+@@ -41,6 +55,8 @@ class ClassificationLoss(TaskLoss):
+                 f"Expected logits with shape (batch, {self.num_classes}), "
+                 f"but got {tuple(logits.shape)}"
+             )
++        if not bool(torch.all(torch.isfinite(logits))):
++            raise ValueError("Classification logits must be finite")
+ 
+         target = label[self.var_name]
+         if target.ndim == 2 and target.shape[1] == 1:
+@@ -61,8 +77,23 @@ class ClassificationLoss(TaskLoss):
+             raise ValueError(f"Class labels must be in [0, {self.num_classes})")
+ 
+         loss = F.cross_entropy(logits, target)
+-        accuracy = (torch.argmax(logits, dim=-1) == target).to(logits.dtype).mean()
+-        return model_pred, loss, {"accuracy": accuracy.detach()}
++        if not bool(torch.isfinite(loss)):
++            raise ValueError("Classification cross-entropy must be finite")
++        # Softmax is used only for reporting probability errors. Cross-entropy
++        # above takes raw logits and performs log-softmax internally.
++        with torch.no_grad():
++            probabilities = torch.softmax(logits, dim=-1)
++            truth = F.one_hot(target, self.num_classes).to(logits.dtype)
++            error = probabilities - truth
++            mse = error.square().mean()
++            metrics = {
++                "ce": loss.detach(),
++                "accuracy": (logits.argmax(dim=-1) == target).to(logits.dtype).mean(),
++                "mae": error.abs().mean(),
++                "mse": mse,
++                "rmse": mse.sqrt(),
++            }
++        return model_pred, loss, {name: metrics[name] for name in self.metric}
+ 
+     @property
+     def label_requirement(self) -> list[DataRequirementItem]:
+@@ -81,6 +112,7 @@ class ClassificationLoss(TaskLoss):
+             "@version": 1,
+             "num_classes": self.num_classes,
+             "var_name": self.var_name,
++            "metric": self.metric,
+         }
+ 
+     @classmethod
+diff --git a/deepmd/pt/model/atomic_model/sezm_atomic_model.py b/deepmd/pt/model/atomic_model/sezm_atomic_model.py
+index f3e0914..2c6fb73 100644
+--- a/deepmd/pt/model/atomic_model/sezm_atomic_model.py
++++ b/deepmd/pt/model/atomic_model/sezm_atomic_model.py
+@@ -30,6 +30,9 @@ from deepmd.pt.model.descriptor.sezm_nn import (
+ from deepmd.pt.model.task.base_fitting import (
+     BaseFitting,
+ )
++from deepmd.pt.model.task.classification import (
++    ClassificationFittingNet,
++)
+ from deepmd.pt.model.task.ener import (
+     EnergyFittingNet,
+     EnergyFittingNetDirect,
+@@ -46,6 +49,10 @@ from deepmd.utils.version import (
+ )
+ 
+ if TYPE_CHECKING:
++    from collections.abc import (
++        Callable,
++    )
++
+     from deepmd.dpmodel import (
+         FittingOutputDef,
+     )
+@@ -102,6 +109,7 @@ class SeZMAtomicModel(DPAtomicModel):
+                 "dens_fitting must be an instance of SeZMDeNSFittingNet for SeZMAtomicModel"
+             )
+         super().__init__(descriptor, fitting, type_map, **kwargs)
++        self.is_classification = isinstance(fitting, ClassificationFittingNet)
+         self.register_buffer(
+             "dens_force_rmsd",
+             self.out_std.new_tensor(1.0),
+@@ -595,6 +603,25 @@ class SeZMAtomicModel(DPAtomicModel):
+             preset_observed_type,
+         )
+ 
++    def compute_or_load_out_stat(
++        self,
++        merged: Callable[[], list[dict]] | list[dict],
++        stat_file_path: DPPath | None = None,
++    ) -> None:
++        """Fit regression statistics only; categorical IDs have no output scale."""
++        if not self.is_classification:
++            super().compute_or_load_out_stat(merged, stat_file_path)
++
++    def change_out_bias(
++        self,
++        sample_merged: Callable[[], list[dict]] | list[dict],
++        stat_file_path: DPPath | None = None,
++        bias_adjust_mode: str = "change-by-statistic",
++    ) -> None:
++        """Keep classification logits unchanged during finetuning and reloads."""
++        if not self.is_classification:
++            super().change_out_bias(sample_merged, stat_file_path, bias_adjust_mode)
++
+     def apply_out_stat(
+         self,
+         ret: dict[str, torch.Tensor],
+@@ -615,6 +642,8 @@ class SeZMAtomicModel(DPAtomicModel):
+         dict[str, torch.Tensor]
+             Outputs after SeZM output-stat post-processing.
+         """
++        if self.is_classification:
++            return ret
+         out_bias, out_std = self._fetch_out_stat(self.bias_keys)
+         for key in self.bias_keys:
+             if key not in ret:
+diff --git a/deepmd/pt/model/model/__init__.py b/deepmd/pt/model/model/__init__.py
+index 4a17306..afc1d7e 100644
+--- a/deepmd/pt/model/model/__init__.py
++++ b/deepmd/pt/model/model/__init__.py
+@@ -84,6 +84,9 @@ from .population_model import (
+ from .property_model import (
+     PropertyModel,
+ )
++from .sezm_classification_model import (
++    SeZMClassificationModel,
++)
+ from .sezm_model import (
+     SeZMModel,
+ )
+@@ -427,10 +430,10 @@ def get_sezm_model(model_params: dict) -> BaseModel:
+     if fitting_net["type"] in ("dpa4_ener", "sezm_ener"):
+         fitting = BaseFitting(**fitting_net)
+         modelcls = SeZMModel
+-    elif fitting_net["type"] == "property":
++    elif fitting_net["type"] in ("property", "classification"):
+         if bridging_method != "NONE":
+             raise ValueError(
+-                "DPA4/SeZM property fitting does not support analytical bridging "
++                "DPA4/SeZM property/classification fitting does not support analytical bridging "
+                 "potentials; set `bridging_method` to `none`."
+             )
+         # Share the SeZM auto-width convention
+@@ -444,10 +447,14 @@ def get_sezm_model(model_params: dict) -> BaseModel:
+             use_aparam_as_mask=fitting_net.get("use_aparam_as_mask", False),
+         )
+         fitting = BaseFitting(**fitting_net)
+-        modelcls = SeZMPropertyModel
++        modelcls = (
++            SeZMClassificationModel
++            if fitting_net["type"] == "classification"
++            else SeZMPropertyModel
++        )
+     else:
+         raise ValueError(
+-            "DPA4/SeZM model supports `dpa4_ener`, `sezm_ener`, or `property` "
++            "DPA4/SeZM model supports `dpa4_ener`, `sezm_ener`, `property`, or `classification` "
+             f"fitting, but got `{fitting_net['type']}`."
+         )
+     atom_exclude_types = model_params.get("atom_exclude_types", [])
+@@ -692,6 +699,7 @@ __all__ = [
+     "LinearEnergyModel",
+     "PolarModel",
+     "PopulationModel",
++    "SeZMClassificationModel",
+     "SeZMModel",
+     "SeZMNativeSpinModel",
+     "SeZMPropertyModel",
+diff --git a/deepmd/pt/model/model/classification_model.py b/deepmd/pt/model/model/classification_model.py
+index 16ab498..1dc7bda 100644
+--- a/deepmd/pt/model/model/classification_model.py
++++ b/deepmd/pt/model/model/classification_model.py
+@@ -64,6 +64,10 @@ class ClassificationModel(DPModelCommon, DPClassificationModel_):
+             )
+         )
+ 
++    @torch.jit.export
++    def get_task_type(self) -> str:
++        return "classification"
++
+     @torch.jit.export
+     def get_task_dim(self) -> int:
+         return self.get_fitting_net().dim_out
+diff --git a/deepmd/pt/model/task/classification.py b/deepmd/pt/model/task/classification.py
+index e53b50d..663085c 100644
+--- a/deepmd/pt/model/task/classification.py
++++ b/deepmd/pt/model/task/classification.py
+@@ -81,6 +81,10 @@ class ClassificationFittingNet(InvarFitting):
+             ]
+         )
+ 
++    def get_intensive(self) -> bool:
++        """Class logits are averaged over atoms, independent of cell size."""
++        return True
++
+     @classmethod
+     def deserialize(cls, data: dict) -> "ClassificationFittingNet":
+         data = data.copy()
+diff --git a/deepmd/utils/argcheck.py b/deepmd/utils/argcheck.py
+index 54c0d2f..fbeb096 100644
+--- a/deepmd/utils/argcheck.py
++++ b/deepmd/utils/argcheck.py
+@@ -3343,7 +3343,7 @@ def standard_model_args() -> Argument:
+ )
+ def sezm_model_args() -> Argument:
+     doc_descrpt = "Descriptor configuration for atomic environments. DPA4/SeZM uses the SeZM descriptor."
+-    doc_fitting = "Fitting network configuration. DPA4/SeZM uses the `dpa4_ener` GLU energy fitting by default and also supports invariant `property` fitting."
++    doc_fitting = "Fitting network configuration. DPA4/SeZM uses the `dpa4_ener` GLU energy fitting by default and also supports invariant `property` and categorical `classification` fitting."
+     doc_model_branch_alias = (
+         "List of aliases for this model branch. "
+         "Multiple aliases can be defined, and any alias can reference this branch throughout the model usage. "
+@@ -3406,7 +3406,7 @@ def sezm_model_args() -> Argument:
+         "are saved with LoRA deltas folded into base weights, producing plain "
+         "DPA4/SeZM checkpoints suitable for deployment."
+     )
+-    doc_model = "DPA4/SeZM model scaffold with the SeZM descriptor and selectable energy or invariant-property fitting."
++    doc_model = "DPA4/SeZM model scaffold with the SeZM descriptor and selectable energy, invariant-property, or classification fitting."
+ 
+     ca = Argument(
+         "dpa4",
+@@ -3437,6 +3437,7 @@ def sezm_model_args() -> Argument:
+                         [
+                             fitting_args_plugin.get_argument("dpa4_ener"),
+                             fitting_args_plugin.get_argument("property"),
++                            fitting_args_plugin.get_argument("classification"),
+                         ],
+                         optional=True,
+                         default_tag="dpa4_ener",
+@@ -4964,7 +4965,17 @@ def loss_property() -> list[Argument]:
+ @loss_args_plugin.register("classification")
+ def loss_classification() -> list[Argument]:
+     """Arguments for single-label cross-entropy loss."""
+-    return []
++    return [
++        Argument(
++            "metric",
++            list[str],
++            optional=True,
++            default=["ce", "accuracy", "mae", "mse", "rmse"],
++            doc="Reported metrics: ce, accuracy, mae, mse, rmse. "
++            "MAE/MSE/RMSE compare softmax probabilities with one-hot targets; "
++            "the training loss is cross-entropy on raw logits.",
++        ),
++    ]
+ 
+ 
+ @loss_args_plugin.register("tensor")
+diff --git a/deepmd/utils/data_system.py b/deepmd/utils/data_system.py
+index 9713a43..f987ff1 100644
+--- a/deepmd/utils/data_system.py
++++ b/deepmd/utils/data_system.py
+@@ -835,7 +835,8 @@ def process_systems(
+     Returns
+     -------
+     result_systems: list of str
+-        The valid systems
++        The valid systems. Discoveries within each search path are sorted;
++        the order of explicitly supplied search paths is preserved.
+     """
+     from deepmd.dpmodel.utils.lmdb_data import (
+         is_lmdb,
+@@ -864,7 +865,9 @@ def process_systems(
+         else:
+             expanded_paths = rglob_sys_str(path, patterns)
+ 
+-        result_systems.extend(expanded_paths)
++        # sys_probs is positional: directory traversal must have the same order
++        # after uploading/extracting data on another filesystem.
++        result_systems.extend(sorted(expanded_paths))
+ 
+     return result_systems
+ 
+diff --git a/deepmd/infer/deep_classification.py b/deepmd/infer/deep_classification.py
+new file mode 100644
+--- /dev/null
++++ b/deepmd/infer/deep_classification.py
+@@ -0,0 +1,28 @@
++# SPDX-License-Identifier: LGPL-3.0-or-later
++"""Inference interface for system-level single-label classification."""
++
++from typing import (
++    Any,
++)
++
++import numpy as np
++
++from deepmd.utils.classification import (
++    classification_probabilities,
++)
++
++from .deep_property import (
++    DeepProperty,
++)
++
++
++class DeepClassification(DeepProperty):
++    """Evaluate raw logits with ``eval`` or probabilities with ``eval_probabilities``.
++
++    The inherited ``eval`` contract returns a tuple whose first array has shape
++    ``(n_structures, num_classes)``. The final category is its row-wise argmax.
++    """
++
++    def eval_probabilities(self, *args: Any, **kwargs: Any) -> np.ndarray:
++        """Return system probabilities; per-atom logits are not atom labels."""
++        return classification_probabilities(self.eval(*args, **kwargs)[0])
+diff --git a/deepmd/pt/model/model/sezm_classification_model.py b/deepmd/pt/model/model/sezm_classification_model.py
+new file mode 100644
+--- /dev/null
++++ b/deepmd/pt/model/model/sezm_classification_model.py
+@@ -0,0 +1,32 @@
++# SPDX-License-Identifier: LGPL-3.0-or-later
++"""System-level classification through the SeZM sparse-edge descriptor."""
++
++import torch
++
++from deepmd.pt.model.model.model import (
++    BaseModel,
++)
++
++from .sezm_property_model import (
++    SeZMPropertyModel,
++)
++
++
++@BaseModel.register("SeZMClassification")
++@BaseModel.register("sezm_classification")
++@BaseModel.register("DPA4Classification")
++@BaseModel.register("dpa4_classification")
++class SeZMClassificationModel(SeZMPropertyModel):
++    """Average per-atom logits without energy derivatives or label scaling.
++
++    The non-conservative sparse-edge path is shared with invariant properties.
++    Categorical output statistics are disabled in ``SeZMAtomicModel`` so that
++    training, checkpoint reloads, and inference use the same raw logits.
++    """
++
++    model_type = "SeZMClassification"
++
++    @torch.jit.export
++    def get_task_type(self) -> str:
++        """Identify classification independently of the user-defined label name."""
++        return "classification"
+diff --git a/deepmd/utils/classification.py b/deepmd/utils/classification.py
+new file mode 100644
+--- /dev/null
++++ b/deepmd/utils/classification.py
+@@ -0,0 +1,125 @@
++# SPDX-License-Identifier: LGPL-3.0-or-later
++"""Stable classification metrics aggregated by structures, not by systems."""
++
++from typing import (
++    Any,
++)
++
++import numpy as np
++
++
++def classification_probabilities(logits: np.ndarray) -> np.ndarray:
++    """Convert finite raw logits to probabilities without changing argmax."""
++    logits = np.asarray(logits, dtype=np.float64)
++    if logits.ndim != 2 or logits.shape[1] < 2 or not np.isfinite(logits).all():
++        raise ValueError("Expected finite logits of shape (n_structures, n_classes>=2)")
++    shifted = logits - logits.max(axis=1, keepdims=True)
++    exp = np.exp(shifted)
++    return exp / exp.sum(axis=1, keepdims=True)
++
++
++def classification_statistics(logits: np.ndarray, labels: np.ndarray) -> dict[str, Any]:
++    """Collect additive counts and sums for exact dataset-wide metrics."""
++    logits = np.asarray(logits, dtype=np.float64)
++    probabilities = classification_probabilities(logits)
++    n, num_classes = logits.shape
++    labels = np.asarray(labels)
++    if labels.ndim == 2 and labels.shape[1] == 1:
++        labels = labels[:, 0]
++    if labels.shape != (n,) or not n:
++        raise ValueError(
++            "Expected one class ID per structure and at least one structure"
++        )
++    if not np.isfinite(labels).all() or not np.equal(labels, np.floor(labels)).all():
++        raise ValueError("Class labels must be finite integers")
++    if (labels < 0).any() or (labels >= num_classes).any():
++        raise ValueError(f"Class labels must be in [0, {num_classes})")
++    labels = labels.astype(np.int64)
++    predicted = logits.argmax(axis=1)
++    confusion = np.bincount(
++        labels * num_classes + predicted, minlength=num_classes**2
++    ).reshape(num_classes, num_classes)
++    shifted = logits - logits.max(axis=1, keepdims=True)
++    log_probabilities = shifted - np.log(np.exp(shifted).sum(axis=1, keepdims=True))
++    error = probabilities - np.eye(num_classes)[labels]
++    return {
++        "n": n,
++        "num_classes": num_classes,
++        "confusion_matrix": confusion.tolist(),
++        "ce_sum": float(-log_probabilities[np.arange(n), labels].sum()),
++        "absolute_error_sum": float(np.abs(error).sum()),
++        "squared_error_sum": float(np.square(error).sum()),
++    }
++
++
++def merge_classification_statistics(statistics: list[dict[str, Any]]) -> dict[str, Any]:
++    """Combine systems/checkpoint chunks before computing nonlinear metrics."""
++    if not statistics:
++        raise ValueError("No classification statistics to merge")
++    num_classes = statistics[0]["num_classes"]
++    if any(stat["num_classes"] != num_classes for stat in statistics):
++        raise ValueError("Cannot merge different numbers of classes")
++    result = {"num_classes": num_classes}
++    for key in ("n", "ce_sum", "absolute_error_sum", "squared_error_sum"):
++        result[key] = sum(stat[key] for stat in statistics)
++    result["confusion_matrix"] = np.sum(
++        [stat["confusion_matrix"] for stat in statistics], axis=0
++    ).tolist()
++    return result
++
++
++def classification_metrics(statistics: dict[str, Any]) -> dict[str, Any]:
++    """Compute metrics from a global confusion matrix and probability sums.
++
++    Confusion rows are true classes, columns are predictions. Macro-F1 includes
++    all configured classes with zero division mapped to zero; balanced accuracy
++    averages recall over classes present in the evaluated labels. In binary
++    tasks class 0 is negative and class 1 is positive.
++    """
++    n, num_classes = statistics["n"], statistics["num_classes"]
++    matrix = np.asarray(statistics["confusion_matrix"], dtype=np.int64)
++    if n <= 0 or matrix.shape != (num_classes, num_classes) or matrix.sum() != n:
++        raise ValueError("Inconsistent classification counts")
++    support = matrix.sum(axis=1)
++    predicted_count = matrix.sum(axis=0)
++    true_positive = matrix.diagonal()
++    precision = np.divide(
++        true_positive,
++        predicted_count,
++        out=np.zeros(num_classes),
++        where=predicted_count > 0,
++    )
++    recall = np.divide(
++        true_positive, support, out=np.zeros(num_classes), where=support > 0
++    )
++    denominator = support + predicted_count
++    f1 = np.divide(
++        2 * true_positive, denominator, out=np.zeros(num_classes), where=denominator > 0
++    )
++    mse = statistics["squared_error_sum"] / (n * num_classes)
++    result = {
++        "n": int(n),
++        "num_classes": int(num_classes),
++        "ce": statistics["ce_sum"] / n,
++        "accuracy": float(true_positive.sum() / n),
++        "macro_f1": float(f1.mean()),
++        "balanced_accuracy": float(recall[support > 0].mean()),
++        "mae": statistics["absolute_error_sum"] / (n * num_classes),
++        "mse": mse,
++        "rmse": float(np.sqrt(mse)),
++        "confusion_matrix": matrix.tolist(),
++        "precision_per_class": precision.tolist(),
++        "recall_per_class": recall.tolist(),
++        "f1_per_class": f1.tolist(),
++        "support_per_class": support.tolist(),
++    }
++    if num_classes == 2:
++        tn, fp, fn, tp = (int(value) for value in matrix.ravel())
++        result.update(
++            tn=tn,
++            fp=fp,
++            fn=fn,
++            tp=tp,
++            false_positive_rate=fp / (tn + fp) if tn + fp else None,
++        )
++    return result
+diff --git a/source/tests/pt/test_sezm_classification.py b/source/tests/pt/test_sezm_classification.py
+new file mode 100644
+--- /dev/null
++++ b/source/tests/pt/test_sezm_classification.py
+@@ -0,0 +1,193 @@
++# SPDX-License-Identifier: LGPL-3.0-or-later
++"""DPA4 classification integration checks, executed on Bohrium for this project."""
++
++import unittest
++from unittest.mock import (
++    Mock,
++    patch,
++)
++
++import torch
++import torch.nn.functional as F
++
++from deepmd.pt.loss.classification import (
++    ClassificationLoss,
++)
++from deepmd.pt.model.atomic_model.base_atomic_model import (
++    BaseAtomicModel,
++)
++from deepmd.pt.model.model import (
++    SeZMClassificationModel,
++    get_model,
++)
++from deepmd.pt.model.model.model import (
++    BaseModel,
++)
++from deepmd.pt.utils import (
++    env,
++)
++
++
++def tiny_model_params() -> dict:
++    """Use the existing SeZM property test's small descriptor geometry."""
++    return {
++        "type": "SeZM",
++        "type_map": ["A", "B"],
++        "descriptor": {
++            "type": "SeZM",
++            "sel": [2, 2],
++            "rcut": 3.0,
++            "channels": 4,
++            "n_focus": 1,
++            "n_radial": 3,
++            "radial_mlp": [6],
++            "use_env_seed": True,
++            "l_schedule": [1, 0],
++            "mmax": 1,
++            "so2_norm": False,
++            "so2_layers": 1,
++            "n_atten_head": 1,
++            "sandwich_norm": [True, False, True, False],
++            "ffn_neurons": 8,
++            "ffn_blocks": 1,
++            "s2_activation": [False, True],
++            "mlp_bias": False,
++            "layer_scale": False,
++            "use_amp": False,
++            "activation_function": "silu",
++            "glu_activation": True,
++            "precision": "float32",
++            "seed": 7,
++        },
++        "fitting_net": {
++            "type": "classification",
++            "label_name": "synthesizable",
++            "num_classes": 2,
++            "neuron": [8],
++            "activation_function": "silu",
++            "resnet_dt": False,
++            "precision": "float32",
++            "seed": 7,
++        },
++        "use_compile": False,
++        "enable_tf32": False,
++    }
++
++
++class TestSeZMClassification(unittest.TestCase):
++    def setUp(self) -> None:
++        torch.manual_seed(2024)
++        self.model = get_model(tiny_model_params()).to(env.DEVICE)
++
++    @staticmethod
++    def frame() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++        coord = torch.tensor(
++            [
++                [
++                    [0.5, 0.5, 0.5],
++                    [1.5, 1.5, 0.5],
++                    [0.5, 1.5, 1.5],
++                    [1.5, 0.5, 1.5],
++                    [2.2, 2.1, 2.3],
++                ]
++            ],
++            dtype=env.GLOBAL_PT_FLOAT_PRECISION,
++            device=env.DEVICE,
++        )
++        atype = torch.tensor([[0, 0, 1, 1, 0]], device=env.DEVICE)
++        box = 5.0 * torch.eye(3, dtype=coord.dtype, device=env.DEVICE).reshape(1, 9)
++        return coord, atype, box
++
++    def test_logits_intensive_no_derivatives_and_serialization(self) -> None:
++        self.assertIsInstance(self.model, SeZMClassificationModel)
++        self.assertTrue(self.model.get_intensive())
++        self.assertEqual(self.model.get_task_type(), "classification")
++        coord, atype, box = self.frame()
++        result = self.model(coord, atype, box=box)
++        self.assertEqual(result["synthesizable"].shape, (1, 2))
++        self.assertEqual(result["atom_synthesizable"].shape, (1, 5, 2))
++        self.assertNotIn("force", result)
++        self.assertNotIn("virial", result)
++        torch.testing.assert_close(
++            result["synthesizable"], result["atom_synthesizable"].mean(dim=1)
++        )
++        restored = BaseModel.deserialize(self.model.serialize()).to(env.DEVICE)
++        self.assertIsInstance(restored, SeZMClassificationModel)
++        self.assertTrue(restored.atomic_model.is_classification)
++        torch.testing.assert_close(
++            result["synthesizable"], restored(coord, atype, box=box)["synthesizable"]
++        )
++
++    def test_classification_skips_output_stats_even_after_reload(self) -> None:
++        atom = self.model.atomic_model
++        with torch.no_grad():
++            atom.out_bias.fill_(13.0)
++            atom.out_std.fill_(7.0)
++        restored = BaseModel.deserialize(self.model.serialize()).to(env.DEVICE)
++        for atom in (atom, restored.atomic_model):
++            sampler = Mock(
++                side_effect=AssertionError("must not sample labels for regression")
++            )
++            bias, std = atom.out_bias.clone(), atom.out_std.clone()
++            atom.compute_or_load_out_stat(sampler)
++            for mode in ("change-by-statistic", "set-by-statistic"):
++                atom.change_out_bias(sampler, bias_adjust_mode=mode)
++            sampler.assert_not_called()
++            torch.testing.assert_close(atom.out_bias, bias)
++            torch.testing.assert_close(atom.out_std, std)
++            logits = torch.tensor([[[2.0, -1.0]]], device=env.DEVICE)
++            result = atom.apply_out_stat(
++                {"synthesizable": logits.clone()},
++                torch.tensor([[0]], device=env.DEVICE),
++            )
++            torch.testing.assert_close(result["synthesizable"], logits)
++
++    def test_energy_keeps_regression_stats_and_bias(self) -> None:
++        params = tiny_model_params()
++        params["fitting_net"] = {
++            "type": "dpa4_ener",
++            "neuron": [8],
++            "precision": "float32",
++        }
++        atom = get_model(params).to(env.DEVICE).atomic_model
++        self.assertFalse(atom.is_classification)
++        with patch.object(BaseAtomicModel, "change_out_bias") as change:
++            sampler = Mock()
++            atom.change_out_bias(sampler, bias_adjust_mode="set-by-statistic")
++            change.assert_called_once_with(sampler, None, "set-by-statistic")
++        with torch.no_grad():
++            atom.out_bias.fill_(3.0)
++            atom.out_std.fill_(10.0)
++        energy = torch.ones((1, 1, 1), device=env.DEVICE)
++        result = atom.apply_out_stat(
++            {"energy": energy}, torch.tensor([[0]], device=env.DEVICE)
++        )
++        torch.testing.assert_close(
++            result["energy"], torch.full_like(result["energy"], 4.0)
++        )
++
++    def test_cross_entropy_gradient_metrics_and_loss_roundtrip(self) -> None:
++        coord, atype, box = self.frame()
++        loss = ClassificationLoss(2, "synthesizable")
++        result, value, metrics = loss(
++            {"coord": coord, "atype": atype, "box": box},
++            self.model,
++            {"synthesizable": torch.tensor([[0]], device=env.DEVICE)},
++            natoms=5,
++        )
++        expected = F.cross_entropy(
++            result["synthesizable"], torch.tensor([0], device=env.DEVICE)
++        )
++        torch.testing.assert_close(value, expected)
++        torch.testing.assert_close(metrics["ce"], value.detach())
++        torch.testing.assert_close(metrics["rmse"].square(), metrics["mse"])
++        value.backward()
++        self.assertTrue(
++            any(
++                p.grad is not None and bool(torch.count_nonzero(p.grad))
++                for p in self.model.get_descriptor().parameters()
++            )
++        )
++        self.assertEqual(
++            ClassificationLoss.deserialize(loss.serialize()).metric, loss.metric
++        )
+diff --git a/source/tests/test_classification_metrics.py b/source/tests/test_classification_metrics.py
+new file mode 100644
+--- /dev/null
++++ b/source/tests/test_classification_metrics.py
+@@ -0,0 +1,82 @@
++# SPDX-License-Identifier: LGPL-3.0-or-later
++"""Pure NumPy checks; these tests never load or run a model."""
++
++import unittest
++
++import numpy as np
++
++from deepmd.utils.classification import (
++    classification_metrics,
++    classification_probabilities,
++    classification_statistics,
++    merge_classification_statistics,
++)
++
++
++class TestClassificationMetrics(unittest.TestCase):
++    def test_stable_softmax_and_cross_entropy(self) -> None:
++        logits = np.array([[1001.0, 1000.0], [-1001.0, -1000.0]])
++        labels = np.array([[0], [1]], dtype=np.int32)
++        probability = classification_probabilities(logits)
++        np.testing.assert_allclose(probability.sum(axis=1), 1.0)
++        np.testing.assert_array_equal(probability.argmax(axis=1), logits.argmax(axis=1))
++        metrics = classification_metrics(classification_statistics(logits, labels))
++        self.assertAlmostEqual(metrics["ce"], np.log1p(np.exp(-1)))
++        self.assertAlmostEqual(metrics["mae"], 1 / (1 + np.exp(1)))
++        self.assertEqual(metrics["macro_f1"], 1.0)
++
++    def test_merge_unequal_system_sizes_matches_concatenation(self) -> None:
++        logits = np.array([[2, 0], [0, 1], [0, 2], [1, 0], [0, 3]], dtype=float)
++        labels = np.array([0, 0, 1, 1, 1])
++        combined = classification_metrics(classification_statistics(logits, labels))
++        merged = classification_metrics(
++            merge_classification_statistics(
++                [
++                    classification_statistics(logits[:1], labels[:1]),
++                    classification_statistics(logits[1:], labels[1:]),
++                ]
++            )
++        )
++        for key, value in combined.items():
++            np.testing.assert_allclose(merged[key], value, rtol=1e-14, atol=1e-14)
++        self.assertEqual(merged["confusion_matrix"], [[1, 1], [1, 2]])
++        self.assertAlmostEqual(merged["macro_f1"], (0.5 + 2 / 3) / 2)
++        self.assertAlmostEqual(merged["balanced_accuracy"], (0.5 + 2 / 3) / 2)
++        self.assertEqual(merged["false_positive_rate"], 0.5)
++
++    def test_all_positive_predictions_are_not_high_macro_f1(self) -> None:
++        labels = np.array([0, 1, 1, 1])
++        metrics = classification_metrics(
++            classification_statistics(np.tile([0.0, 2.0], (4, 1)), labels)
++        )
++        self.assertEqual(metrics["accuracy"], 0.75)
++        self.assertEqual(metrics["balanced_accuracy"], 0.5)
++        self.assertAlmostEqual(metrics["macro_f1"], 3 / 7)
++        self.assertEqual(metrics["false_positive_rate"], 1.0)
++
++    def test_tie_predicts_first_class(self) -> None:
++        metrics = classification_metrics(
++            classification_statistics(np.zeros((2, 2)), np.array([0, 1]))
++        )
++        self.assertEqual(metrics["confusion_matrix"], [[1, 0], [1, 0]])
++
++    def test_rejects_bad_label_shapes_values_and_nonfinite_logits(self) -> None:
++        logits = np.zeros((2, 2))
++        for labels in (
++            np.eye(2),
++            np.array([0.5, 1]),
++            np.array([0, 2]),
++            np.array([0, np.nan]),
++        ):
++            with self.subTest(labels=labels), self.assertRaises(ValueError):
++                classification_statistics(logits, labels)
++        with self.assertRaises(ValueError):
++            classification_probabilities(np.array([[np.inf, 0.0]]))
++
++    def test_multiclass_metrics(self) -> None:
++        metrics = classification_metrics(
++            classification_statistics(np.eye(3) * 3, np.arange(3))
++        )
++        self.assertEqual(metrics["macro_f1"], 1.0)
++        self.assertEqual(metrics["support_per_class"], [1, 1, 1])
++        self.assertNotIn("false_positive_rate", metrics)

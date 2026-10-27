@@ -1,0 +1,67 @@
+{
+  "selection": {
+    "selection_complete": true,
+    "selection_split": "valid",
+    "evaluation_unit": "structure",
+    "primary_metric": "macro_f1",
+    "metric_classes": 3,
+    "tie_breakers": [
+      "balanced_accuracy",
+      "lower_mae",
+      "earlier_step"
+    ],
+    "class_order": [
+      "Impure",
+      "Nearly Pure",
+      "Pure"
+    ],
+    "prediction_rule": "argmax of three raw logits",
+    "test_used": false,
+    "best": {
+      "step": 95000,
+      "family": "ema",
+      "checkpoint": "model_three_class_ema.ckpt-95000.pt",
+      "split": "valid",
+      "n": 192,
+      "ce": 9.019197318208407,
+      "accuracy": 0.8489583333333334,
+      "macro_f1": 0.756804180984655,
+      "balanced_accuracy": 0.7366366366366366,
+      "mae": 0.10289657586408502,
+      "mse": 0.10086894514642905,
+      "rmse": 0.31759871716748017,
+      "binary_accuracy": 0.9947916666666666,
+      "binary_macro_f1": 0.9899869621903521,
+      "tn": 29,
+      "fp": 1,
+      "fn": 0,
+      "tp": 162,
+      "false_positive_rate": 0.03333333333333333
+    },
+    "selected_checkpoint_train_metrics": {
+      "step": 95000,
+      "family": "ema",
+      "checkpoint": "model_three_class_ema.ckpt-95000.pt",
+      "split": "train",
+      "n": 1476,
+      "ce": 0.15886045332524854,
+      "accuracy": 0.964769647696477,
+      "macro_f1": 0.950756844350073,
+      "balanced_accuracy": 0.9368178678487707,
+      "mae": 0.023106667909653142,
+      "mse": 0.019205345895476008,
+      "rmse": 0.13858335360163576,
+      "binary_accuracy": 0.9823848238482384,
+      "binary_macro_f1": 0.9607350413358435,
+      "tn": 177,
+      "fp": 23,
+      "fn": 3,
+      "tp": 1273,
+      "false_positive_rate": 0.115
+    },
+    "selected_model_file": "best_checkpoint.pt"
+  },
+  "model_sha256": "89b4f0115e63bd29c13907713590c0bd8652b3a734ecd6795bfd568cf3a440d3",
+  "test_used_for_selection": false,
+  "test_extracted": false
+}

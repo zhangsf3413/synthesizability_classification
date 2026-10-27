@@ -1,0 +1,517 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+from collections.abc import (
+    Callable,
+)
+from typing import (
+    TYPE_CHECKING,
+    Any,
+)
+
+if TYPE_CHECKING:
+    from deepmd.dpmodel.utils.neighbor_graph import (
+        NeighborGraph,
+    )
+
+from deepmd.dpmodel.array_api import (
+    Array,
+    xp_take_first_n,
+)
+from deepmd.dpmodel.descriptor.base_descriptor import (
+    BaseDescriptor,
+)
+from deepmd.dpmodel.fitting.base_fitting import (
+    BaseFitting,
+)
+from deepmd.dpmodel.output_def import (
+    FittingOutputDef,
+)
+from deepmd.utils.path import (
+    DPPath,
+)
+from deepmd.utils.version import (
+    check_version_compatibility,
+)
+
+from .base_atomic_model import (
+    BaseAtomicModel,
+)
+
+
+def _extend_graph_aparam(
+    aparam: Array,
+    n_node: Array,
+    n_local: Array,
+    n_total: int,
+) -> Array:
+    """Expand frame-local atomic parameters onto a local-plus-halo node axis."""
+    import array_api_compat
+
+    from deepmd.dpmodel.utils.neighbor_graph import (
+        frame_id_from_n_node,
+        node_ownership_mask,
+    )
+
+    xp = array_api_compat.array_namespace(aparam, n_node, n_local)
+    frame_id = frame_id_from_n_node(n_node, n_total=n_total)
+    frame_end = xp.cumulative_sum(n_node)
+    frame_start = frame_end - n_node
+    node_index = xp.arange(
+        n_total,
+        dtype=n_node.dtype,
+        device=array_api_compat.device(n_node),
+    )
+    index_in_frame = node_index - xp.take(frame_start, frame_id, axis=0)
+    local_capacity = aparam.shape[1]
+    sentinel = xp.zeros(
+        (aparam.shape[0], 1, aparam.shape[2]),
+        dtype=aparam.dtype,
+        device=array_api_compat.device(aparam),
+    )
+    padded_aparam = xp.concat([aparam, sentinel], axis=1)
+    padded_capacity = local_capacity + 1
+    local_index = index_in_frame % padded_capacity
+    flat_index = frame_id * padded_capacity + local_index
+    flat_aparam = xp.reshape(padded_aparam, (-1, aparam.shape[-1]))
+    gathered = xp.take(flat_aparam, flat_index, axis=0)
+    ownership = node_ownership_mask(n_node, n_local, n_total)
+    return xp.where(ownership[:, None], gathered, xp.zeros_like(gathered))
+
+
+@BaseAtomicModel.register("standard")
+class DPAtomicModel(BaseAtomicModel):
+    r"""Model give atomic prediction of some physical property.
+
+    The atomic model computes atomic properties by first extracting a descriptor
+    from the atomic environment, then passing it through a fitting network:
+
+    .. math::
+        \mathcal{D}^i = \mathcal{D}(\mathbf{R}^i, \mathbf{R}_j, \alpha_j),
+
+    .. math::
+        \mathbf{y}^i = \mathcal{F}(\mathcal{D}^i),
+
+    where :math:`\mathcal{D}^i` is the descriptor for atom :math:`i`,
+    :math:`\alpha_j` is the atom type of neighbor :math:`j`,
+    :math:`\mathcal{F}` is the fitting network, and
+    :math:`\mathbf{y}^i` is the predicted atomic property (energy, dipole, etc.).
+
+    Parameters
+    ----------
+    descriptor
+            Descriptor
+    fitting_net
+            Fitting net
+    type_map
+            Mapping atom type to the name (str) of the type.
+            For example `type_map[1]` gives the name of the type 1.
+
+    """
+
+    def __init__(
+        self,
+        descriptor: BaseDescriptor,
+        fitting: BaseFitting,
+        type_map: list[str],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(type_map, **kwargs)
+        self.descriptor = descriptor
+        self.fitting_net = fitting
+        if hasattr(self.fitting_net, "reinit_exclude"):
+            self.fitting_net.reinit_exclude(self.atom_exclude_types)
+        self.type_map = type_map
+        self.add_chg_spin_ebd: bool = getattr(
+            self.descriptor, "add_chg_spin_ebd", False
+        )
+        super().init_out_stat()
+
+    def has_chg_spin_ebd(self) -> bool:
+        """Check if the model has charge spin embedding."""
+        return self.add_chg_spin_ebd
+
+    def get_dim_chg_spin(self) -> int:
+        """Get the dimension of charge_spin input."""
+        if self.add_chg_spin_ebd:
+            return self.descriptor.get_dim_chg_spin()
+        return 0
+
+    def has_default_chg_spin(self) -> bool:
+        """Check if the model has default charge_spin values."""
+        if self.add_chg_spin_ebd:
+            return self.descriptor.has_default_chg_spin()
+        return False
+
+    def get_default_chg_spin(self) -> list[float] | None:
+        """Get the default charge_spin values."""
+        if self.add_chg_spin_ebd and self.descriptor.has_default_chg_spin():
+            return self.descriptor.get_default_chg_spin()
+        return None
+
+    def fitting_output_def(self) -> FittingOutputDef:
+        """Get the output def of the fitting net."""
+        return self.fitting_net.output_def()
+
+    def get_rcut(self) -> float:
+        """Get the cut-off radius."""
+        return self.descriptor.get_rcut()
+
+    def get_sel(self) -> list[int]:
+        """Get the neighbor selection."""
+        return self.descriptor.get_sel()
+
+    def set_case_embd(self, case_idx: int) -> None:
+        """
+        Set the case embedding of this atomic model by the given case_idx,
+        typically concatenated with the output of the descriptor and fed into the fitting net.
+        """
+        self.fitting_net.set_case_embd(case_idx)
+
+    def mixed_types(self) -> bool:
+        """If true, the model
+        1. assumes total number of atoms aligned across frames;
+        2. uses a neighbor list that does not distinguish different atomic types.
+
+        If false, the model
+        1. assumes total number of atoms of each atom type aligned across frames;
+        2. uses a neighbor list that distinguishes different atomic types.
+
+        """
+        return self.descriptor.mixed_types()
+
+    def has_message_passing(self) -> bool:
+        """Returns whether the atomic model has message passing."""
+        return self.descriptor.has_message_passing()
+
+    def need_sorted_nlist_for_lower(self) -> bool:
+        """Returns whether the atomic model needs sorted nlist when using `forward_lower`."""
+        return self.descriptor.need_sorted_nlist_for_lower()
+
+    def enable_compression(
+        self,
+        min_nbor_dist: float,
+        table_extrapolate: float = 5,
+        table_stride_1: float = 0.01,
+        table_stride_2: float = 0.1,
+        check_frequency: int = -1,
+    ) -> None:
+        """Call descriptor enable_compression().
+
+        Parameters
+        ----------
+        min_nbor_dist
+            The nearest distance between atoms
+        table_extrapolate
+            The scale of model extrapolation
+        table_stride_1
+            The uniform stride of the first table
+        table_stride_2
+            The uniform stride of the second table
+        check_frequency
+            The overflow check frequency
+        """
+        self.descriptor.enable_compression(
+            min_nbor_dist,
+            table_extrapolate,
+            table_stride_1,
+            table_stride_2,
+            check_frequency,
+        )
+
+    def forward_atomic(
+        self,
+        extended_coord: Array,
+        extended_atype: Array,
+        nlist: Array,
+        mapping: Array | None = None,
+        fparam: Array | None = None,
+        aparam: Array | None = None,
+        comm_dict: dict | None = None,
+        charge_spin: Array | None = None,
+    ) -> dict[str, Array]:
+        """Models' atomic predictions.
+
+        Parameters
+        ----------
+        extended_coord
+            coordinates in extended region
+        extended_atype
+            atomic type in extended region
+        nlist
+            neighbor list. nf x nloc x nsel
+        mapping
+            mapps the extended indices to local indices. nf x nall
+        fparam
+            frame parameter. nf x ndf
+        aparam
+            atomic parameter. nf x nloc x nda
+        comm_dict
+            MPI communication metadata for parallel inference. ``None`` for
+            non-parallel inference (default). Forwarded to the descriptor.
+        charge_spin
+            charge and spin parameter for descriptor. nf x 2
+
+        Returns
+        -------
+        result_dict
+            the result dict, defined by the `FittingOutputDef`.
+
+        """
+        nframes, nloc, nnei = nlist.shape
+        atype = xp_take_first_n(extended_atype, 1, nloc)
+
+        # Handle default charge_spin if descriptor supports it
+        if self.add_chg_spin_ebd and charge_spin is None:
+            default_cs = self.descriptor.get_default_chg_spin()
+            if default_cs is not None:
+                from deepmd.dpmodel.array_api import (
+                    array_api_compat,
+                )
+
+                xp = array_api_compat.array_namespace(extended_coord)
+                cs_array = xp.asarray(
+                    default_cs,
+                    dtype=extended_coord.dtype,
+                    device=array_api_compat.device(extended_coord),
+                )
+                charge_spin = xp.tile(xp.reshape(cs_array, (1, -1)), (nframes, 1))
+
+        descriptor, rot_mat, g2, h2, sw = self.descriptor(
+            extended_coord,
+            extended_atype,
+            nlist,
+            mapping=mapping,
+            comm_dict=comm_dict,
+            charge_spin=charge_spin if self.add_chg_spin_ebd else None,
+        )
+        ret = self.fitting_net(
+            descriptor,
+            atype,
+            gr=rot_mat,
+            g2=g2,
+            h2=h2,
+            fparam=fparam,
+            aparam=aparam,
+        )
+        return ret
+
+    def forward_atomic_graph(
+        self,
+        graph: "NeighborGraph",
+        atype: Array,
+        fparam: Array | None = None,
+        aparam: Array | None = None,
+        charge_spin: Array | None = None,
+        comm_dict: dict | None = None,
+    ) -> dict[str, Array]:
+        """Graph analogue of :meth:`forward_atomic` on the flat node axis.
+
+        Runs the descriptor ``call_graph`` then the fitting ``call_graph`` PER NODE
+        and returns the raw fitting dict on the flat ``(N, *)`` axis (no reduction
+        or masking; the wrapper handles those). ``fparam`` is gathered to nodes by
+        ``frame_id`` so each node sees its frame's parameter.
+
+        Parameters
+        ----------
+        graph
+            neighbor graph for the local atoms (ghost-free)
+        atype
+            flat local atom types. N
+        fparam
+            frame parameter. nf x ndf
+        aparam
+            atomic parameter. N x nda
+        charge_spin
+            charge/spin conditioning. Unused by the dpa1 graph path; accepted so
+            the interface stays stable for charge/spin-conditioned descriptors.
+        comm_dict
+            MPI communication metadata forwarded to the descriptor's
+            ``call_graph`` (the message-passing part). ``None`` for
+            non-parallel inference (default). Mirrors :meth:`forward_atomic`'s
+            ``comm_dict`` on the dense route.
+
+        Returns
+        -------
+        result_dict
+            the result dict on the flat node axis, defined by the `FittingOutputDef`.
+
+        """
+        import array_api_compat
+
+        from deepmd.dpmodel.utils.neighbor_graph import (
+            frame_id_from_n_node,
+        )
+
+        xp = array_api_compat.array_namespace(graph.edge_vec)
+        type_embedding = self.descriptor.type_embedding.call()
+        gg, rot_mat = self.descriptor.call_graph(
+            graph, atype, type_embedding=type_embedding, comm_dict=comm_dict
+        )
+        fparam_node = None
+        if fparam is not None:
+            # Pass the STATIC flat node count (``atype.shape[0] == N``) so the
+            # helper does not fall back to ``int(sum(n_node))``: that int() on a
+            # traced tensor breaks make_fx / torch.export
+            # (``GuardOnDataDependentSymNode``) for the graph .pt2 export and
+            # compiled-training paths when ``numb_fparam > 0``.
+            frame_id = frame_id_from_n_node(graph.n_node, n_total=atype.shape[0])
+            fparam_node = xp.take(fparam, frame_id, axis=0)  # (N, ndf)
+        aparam_node = aparam
+        if aparam is not None and graph.n_local is not None and aparam.ndim == 3:
+            aparam_node = _extend_graph_aparam(
+                aparam,
+                graph.n_node,
+                graph.n_local,
+                atype.shape[0],
+            )
+        return self.fitting_net.call_graph(
+            gg,
+            atype,
+            gr=rot_mat,
+            g2=None,
+            h2=None,
+            fparam=fparam_node,
+            aparam=aparam_node,
+        )
+
+    def compute_or_load_stat(
+        self,
+        sampled_func: Callable[[], list[dict]],
+        stat_file_path: DPPath | None = None,
+        compute_or_load_out_stat: bool = True,
+        preset_observed_type: list[str] | None = None,
+    ) -> None:
+        """Compute or load the statistics parameters of the model,
+        such as mean and standard deviation of descriptors or the energy bias of the fitting net.
+
+        Parameters
+        ----------
+        sampled_func
+            The lazy sampled function to get data frames from different data systems.
+        stat_file_path
+            The path to the stat file.
+        compute_or_load_out_stat : bool
+            Whether to compute the output statistics.
+            If False, it will only compute the input statistics
+            (e.g. mean and standard deviation of descriptors).
+        """
+        if stat_file_path is not None and self.type_map is not None:
+            stat_file_path /= " ".join(self.type_map)
+
+        wrapped_sampler = self._make_wrapped_sampler(sampled_func)
+        self.descriptor.compute_input_stats(wrapped_sampler, stat_file_path)
+        self.fitting_net.compute_input_stats(
+            wrapped_sampler, stat_file_path=stat_file_path
+        )
+        if compute_or_load_out_stat:
+            self.compute_or_load_out_stat(wrapped_sampler, stat_file_path)
+
+        self._collect_and_set_observed_type(
+            wrapped_sampler, stat_file_path, preset_observed_type
+        )
+
+    def change_type_map(
+        self, type_map: list[str], model_with_new_type_stat: Any | None = None
+    ) -> None:
+        """Change the type related params to new ones, according to `type_map` and the original one in the model.
+        If there are new types in `type_map`, statistics will be updated accordingly to `model_with_new_type_stat` for these new types.
+        """
+        super().change_type_map(
+            type_map=type_map, model_with_new_type_stat=model_with_new_type_stat
+        )
+        self.type_map = type_map
+        self.descriptor.change_type_map(
+            type_map=type_map,
+            model_with_new_type_stat=model_with_new_type_stat.descriptor
+            if model_with_new_type_stat is not None
+            else None,
+        )
+        self.fitting_net.change_type_map(type_map=type_map)
+
+    def compute_fitting_input_stat(
+        self,
+        sample_merged: Callable[[], list[dict]] | list[dict],
+        stat_file_path: DPPath | None = None,
+    ) -> None:
+        """Compute the input statistics (e.g. mean and stddev) for the fittings from packed data.
+
+        Parameters
+        ----------
+        sample_merged : Union[Callable[[], list[dict]], list[dict]]
+            - list[dict]: A list of data samples from various data systems.
+                Each element, ``merged[i]``, is a data dictionary containing
+                ``keys``: ``np.ndarray`` originating from the ``i``-th data system.
+            - Callable[[], list[dict]]: A lazy function that returns data samples
+                in the above format only when needed.
+        stat_file_path : Optional[DPPath]
+            The path to the stat file.
+        """
+        self.fitting_net.compute_input_stats(
+            sample_merged,
+            protection=self.data_stat_protect,
+            stat_file_path=stat_file_path,
+        )
+
+    def serialize(self) -> dict:
+        dd = super().serialize()
+        dd.update(
+            {
+                "@class": "Model",
+                "type": "standard",
+                "@version": 2,
+                "type_map": self.type_map,
+                "descriptor": self.descriptor.serialize(),
+                "fitting": self.fitting_net.serialize(),
+            }
+        )
+        return dd
+
+    # for subclass overridden
+    base_descriptor_cls = BaseDescriptor
+    """The base descriptor class."""
+    base_fitting_cls = BaseFitting
+    """The base fitting class."""
+
+    @classmethod
+    def deserialize(cls, data: dict[str, Any]) -> "DPAtomicModel":
+        data = data.copy()
+        check_version_compatibility(data.pop("@version", 1), 2, 2)
+        data.pop("@class")
+        data.pop("type")
+        descriptor_obj = cls.base_descriptor_cls.deserialize(data.pop("descriptor"))
+        fitting_obj = cls.base_fitting_cls.deserialize(data.pop("fitting"))
+        data["descriptor"] = descriptor_obj
+        data["fitting"] = fitting_obj
+        obj = super().deserialize(data)
+        return obj
+
+    def get_dim_fparam(self) -> int:
+        """Get the number (dimension) of frame parameters of this atomic model."""
+        return self.fitting_net.get_dim_fparam()
+
+    def get_dim_aparam(self) -> int:
+        """Get the number (dimension) of atomic parameters of this atomic model."""
+        return self.fitting_net.get_dim_aparam()
+
+    def has_default_fparam(self) -> bool:
+        """Check if the model has default frame parameters."""
+        return self.fitting_net.has_default_fparam()
+
+    def get_default_fparam(self) -> list[float] | None:
+        """Get the default frame parameters."""
+        return self.fitting_net.get_default_fparam()
+
+    def get_sel_type(self) -> list[int]:
+        """Get the selected atom types of this model.
+
+        Only atoms with selected atom types have atomic contribution
+        to the result of the model.
+        If returning an empty list, all atom types are selected.
+        """
+        return self.fitting_net.get_sel_type()
+
+    def is_aparam_nall(self) -> bool:
+        """Check whether the shape of atomic parameters is (nframes, nall, ndim).
+
+        If False, the shape is (nframes, nloc, ndim).
+        """
+        return False
